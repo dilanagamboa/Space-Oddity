@@ -1,8 +1,7 @@
 """Configuración central de Space Oddity.
 
-Lee los valores sensibles desde variables de entorno o, si no existen, desde
-``.streamlit/secrets.toml``. Es el único módulo que sabe de dónde viene la
-configuración, de modo que el resto del código solo llama a ``obtener_config()``.
+Rutas del proyecto y claves externas. Las claves se leen de variables de entorno
+o, si no existen, de ``.streamlit/secrets.toml``.
 """
 
 from __future__ import annotations
@@ -15,31 +14,23 @@ from typing import Any
 
 BASE_DIR: Path = Path(__file__).resolve().parent
 DATA_DIR: Path = BASE_DIR / "data"
-SQLITE_LOCAL_URL: str = f"sqlite:///{(DATA_DIR / 'astro.db').as_posix()}"
+DB_PATH: Path = DATA_DIR / "astro.db"
+SCHEMA_PATH: Path = BASE_DIR / "scripts" / "schema.sql"
 
 
 @dataclass(frozen=True)
 class Config:
-    """Valores de configuración inmutables de la aplicación.
+    """Valores de configuración inmutables.
 
     Attributes:
-        database_url: URL de conexión SQLAlchemy (SQLite local o PostgreSQL/Supabase).
         nasa_api_key: Clave de api.nasa.gov. ``DEMO_KEY`` si no se configuró.
     """
 
-    database_url: str
     nasa_api_key: str
 
 
 def _leer_secreto(clave: str) -> Any | None:
-    """Busca una clave primero en el entorno y luego en ``st.secrets``.
-
-    Args:
-        clave: Nombre de la variable (por ejemplo ``DATABASE_URL``).
-
-    Returns:
-        El valor encontrado o ``None`` si no existe en ninguna fuente.
-    """
+    """Busca una clave primero en el entorno y luego en ``st.secrets``."""
     valor = os.getenv(clave)
     if valor:
         return valor
@@ -51,33 +42,7 @@ def _leer_secreto(clave: str) -> Any | None:
         return None
 
 
-def normalizar_url_db(url: str) -> str:
-    """Adapta la URL de Supabase/PostgreSQL al driver psycopg 3.
-
-    Supabase entrega URLs ``postgresql://`` o ``postgres://``, que SQLAlchemy
-    asociaría al driver psycopg2. Aquí se fuerza ``postgresql+psycopg://``.
-
-    Args:
-        url: URL tal como viene del proveedor.
-
-    Returns:
-        URL lista para ``sqlalchemy.create_engine``.
-    """
-    for prefijo in ("postgres://", "postgresql://"):
-        if url.startswith(prefijo):
-            return "postgresql+psycopg://" + url[len(prefijo):]
-    return url
-
-
 @lru_cache(maxsize=1)
 def obtener_config() -> Config:
-    """Construye la configuración una sola vez por proceso.
-
-    Returns:
-        Instancia de ``Config``. Si no hay ``DATABASE_URL`` usa SQLite local.
-    """
-    url = _leer_secreto("DATABASE_URL") or SQLITE_LOCAL_URL
-    return Config(
-        database_url=normalizar_url_db(str(url)),
-        nasa_api_key=str(_leer_secreto("NASA_API_KEY") or "DEMO_KEY"),
-    )
+    """Construye la configuración una sola vez por proceso."""
+    return Config(nasa_api_key=str(_leer_secreto("NASA_API_KEY") or "DEMO_KEY"))

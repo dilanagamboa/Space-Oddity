@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, date, datetime, time
+from pathlib import Path
 
 import pytest
-import sqlalchemy as sa
-from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
 
-from config import normalizar_url_db
-from core.enums import EstadoAlerta, Rol, Sexo
-from services import schema as s
-from services.database import Repositorios, sesion
+from core.enums import (
+    CategoriaAlerta,
+    CategoriaTarea,
+    EstadoAlerta,
+    EstadoRecordatorio,
+    EstadoTarea,
+    ModoMonitoreo,
+    Rol,
+    Severidad,
+    Sexo,
+    TipoRecordatorio,
+    Triage,
+)
+from services.database import Repositorios, conectar, sesion
+
+IntegrityError = sqlite3.IntegrityError
 
 
 def _t(dia: int, hora: int = 8) -> datetime:
@@ -20,13 +31,44 @@ def _t(dia: int, hora: int = 8) -> datetime:
 
 
 # --- Esquema -----------------------------------------------------------------
-def test_crea_todas_las_tablas(engine: Engine) -> None:
-    assert set(sa.inspect(engine).get_table_names()) == set(s.metadata.tables)
+def test_crea_todas_las_tablas(db_path: Path) -> None:
+    conn = conectar(db_path)
+    tablas = {
+        f["name"]
+        for f in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        if not f["name"].startswith("sqlite_")
+    }
+    conn.close()
+    assert len(tablas) == 20
+    assert {"crew_assignments", "tasks", "simulation_runs", "audit_log"} <= tablas
 
 
-def test_normaliza_url_supabase() -> None:
-    assert normalizar_url_db("postgres://u:p@h/db") == "postgresql+psycopg://u:p@h/db"
-    assert normalizar_url_db("sqlite:///x.db") == "sqlite:///x.db"
+@pytest.mark.parametrize(
+    ("tabla", "columna", "enum_cls"),
+    [
+        ("tasks", "category", CategoriaTarea),
+        ("tasks", "status", EstadoTarea),
+        ("reminders_log", "reminder_type", TipoRecordatorio),
+        ("reminders_log", "status", EstadoRecordatorio),
+        ("alerts", "alert_category", CategoriaAlerta),
+        ("alerts", "severity", Severidad),
+        ("alerts", "status", EstadoAlerta),
+        ("daily_health_reports", "triage_status", Triage),
+        ("mission_logs", "active_monitoring_mode", ModoMonitoreo),
+    ],
+)
+def test_enums_coinciden_con_schema(db_path: Path, tabla: str, columna: str, enum_cls) -> None:
+    """Si alguien cambia core/enums.py sin tocar schema.sql (o al revés), este test falla."""
+    conn = conectar(db_path)
+    (sql,) = conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", [tabla]).fetchone()
+    conn.close()
+    for miembro in enum_cls:
+        assert f"'{miembro.value}'" in sql, f"{enum_cls.__name__}.{miembro.name} falta en {tabla}"
+
+
+def test_rechaza_columnas_inexistentes(db: Repositorios) -> None:
+    with pytest.raises(ValueError, match="no_existe"):
+        db.misiones.insertar(name="X", start_date=date(2026, 1, 1), no_existe=1)
 
 
 # --- Restricciones -------------------------------------------------------------
@@ -63,11 +105,11 @@ def test_borrado_en_cascada(db: Repositorios, escenario: dict) -> None:
     assert db.sangre.listar() == []
 
 
-def test_sesion_revierte_si_hay_error(engine: Engine) -> None:
-    with pytest.raises(RuntimeError), sesion(engine) as db:
+def test_sesion_revierte_si_hay_error(db_path: Path) -> None:
+    with pytest.raises(RuntimeError), sesion(db_path) as db:
         db.misiones.insertar(name="Revertida", start_date=date(2026, 1, 1))
         raise RuntimeError("falla a mitad de la transacción")
-    with sesion(engine) as db:
+    with sesion(db_path) as db:
         assert db.misiones.listar() == []
 
 
@@ -87,7 +129,8 @@ def test_pastilla_asignada_por_doctor(db: Repositorios, escenario: dict) -> None
     )
     (pastilla,) = db.pastillas.activas_de(escenario["astro"])
     assert pastilla["assigned_by"] == escenario["doctor"]
-    assert pastilla["scheduled_time"] == time(8, 0)
+    assert pastilla["scheduled_time"] == "08:00"
+    assert pastilla["start_date"] == "2026-01-01"
 
 
 def test_rango_de_dias_y_simulados(db: Repositorios, escenario: dict) -> None:

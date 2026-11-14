@@ -1,29 +1,30 @@
-"""Fixtures compartidas: cada test recibe una base SQLite en memoria, nueva y vacía."""
+"""Fixtures compartidas: cada test recibe una base SQLite nueva en una carpeta temporal."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import date
+from pathlib import Path
 
 import pytest
-from sqlalchemy.engine import Engine
 
 from core.enums import Rol, Sexo
-from services.database import Repositorios, crear_engine, crear_tablas, sesion
+from scripts.crear_db import crear_base_datos
+from services.database import Repositorios, sesion
 
 
 @pytest.fixture
-def engine() -> Iterator[Engine]:
-    eng = crear_engine("sqlite://")
-    crear_tablas(eng)
-    yield eng
-    eng.dispose()
+def db_path(tmp_path: Path) -> Path:
+    """Crea una base con el esquema real (scripts/schema.sql) y devuelve su ruta."""
+    ruta = tmp_path / "test.db"
+    crear_base_datos(ruta)
+    return ruta
 
 
 @pytest.fixture
-def db(engine: Engine) -> Iterator[Repositorios]:
+def db(db_path: Path) -> Iterator[Repositorios]:
     """Repositorios dentro de una transacción que se confirma al final del test."""
-    with sesion(engine) as repos:
+    with sesion(db_path) as repos:
         yield repos
 
 
