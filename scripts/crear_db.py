@@ -1,40 +1,51 @@
-"""Inicializa el esquema SQLite de astro-health en data/astro.db."""
+"""Crea las tablas de Space Oddity en la base configurada.
 
-from pathlib import Path
-import sqlite3
+Usa ``DATABASE_URL`` (Supabase) si existe, o ``data/astro.db`` en local.
 
-BASE_DIR: Path = Path(__file__).resolve().parent.parent
-SCHEMA_PATH: Path = BASE_DIR / "scripts" / "schema.sql"
-DB_PATH: Path = BASE_DIR / "data" / "astro.db"
+Ejecutar desde la raíz del repo::
+
+    python -m scripts.crear_db            # crea lo que falte
+    python -m scripts.crear_db --reset    # BORRA todo y lo recrea (solo desarrollo)
+"""
+
+from __future__ import annotations
+
+import argparse
+
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from services.database import obtener_engine
+from services.schema import metadata
 
 
-def crear_base_datos(db_path: Path = DB_PATH, schema_path: Path = SCHEMA_PATH) -> None:
-    """Crea el archivo SQLite y ejecuta el DDL definido en schema.sql.
+def crear_base_datos(engine: Engine | None = None, *, reset: bool = False) -> None:
+    """Crea las tablas e índices definidos en ``services/schema.py``.
 
     Args:
-        db_path: Ruta destino del archivo astro.db.
-        schema_path: Ruta al archivo schema.sql con las tablas e índices.
+        engine: Engine destino. Por defecto, el de la configuración.
+        reset: Si es ``True``, elimina todas las tablas antes de crearlas.
     """
-    if not schema_path.exists():
-        raise FileNotFoundError(f"No se encontró el archivo de esquema: {schema_path}")
-
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    sql_script: str = schema_path.read_text(encoding="utf-8")
-
-    conn: sqlite3.Connection | None = None
+    engine = engine or obtener_engine()
     try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.executescript(sql_script)
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-        conn.commit()
-        print(f"[OK] Base de datos inicializada correctamente en: {db_path}")
-    except sqlite3.Error as exc:
-        raise RuntimeError(f"Error al crear la base de datos SQLite: {exc}") from exc
-    finally:
-        if conn is not None:
-            conn.close()
+        if reset:
+            metadata.drop_all(engine)
+        metadata.create_all(engine)
+    except SQLAlchemyError as exc:
+        raise RuntimeError(f"Error al crear la base de datos: {exc}") from exc
+    print(f"[OK] {len(metadata.tables)} tablas listas en: {engine.url.render_as_string()}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--reset", action="store_true", help="Borra y recrea todas las tablas.")
+    args = parser.parse_args()
+
+    if args.reset and input("Esto borra TODOS los datos. Escriba 'si' para continuar: ") != "si":
+        print("Cancelado.")
+        return
+    crear_base_datos(reset=args.reset)
 
 
 if __name__ == "__main__":
-    crear_base_datos()
+    main()

@@ -1,0 +1,10 @@
+streamlit>=1.40
+sqlalchemy>=2.0,<2.1
+psycopg[binary]>=3.2
+requests>=2.32
+pyyaml>=6.0
+bcrypt>=4.2
+
+# Desarrollo
+pytest>=8.0
+ruff>=0.6
