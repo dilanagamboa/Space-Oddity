@@ -1,4 +1,16 @@
-"""Alert notification dispatcher using Strategy + Registry and Observer patterns."""
+"""Alert notification service using Strategy + Registry and Observer patterns.
+
+Listens to `AlertEvent` published on `services.eventos.EventBus`, formats
+clinical alert emails in Spanish for the astronaut and flight surgeons (`Rol.DOCTOR`),
+dispatches via the selected channel strategy, and marks `alerts.email_sent = 1`.
+
+Patterns:
+    * **Strategy + Registry**: each delivery channel is a `DeliveryChannel`
+      subclass registered in `CHANNELS` (`email`, `log`).
+    * **Observer**: `subscribe_notifications(bus, ...)` registers the handler.
+    * **Idempotent**: checks `alerts.email_sent` before sending so an alert is
+      never emailed twice.
+"""
 
 from __future__ import annotations
 
@@ -9,15 +21,17 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
 import smtplib
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from config import DB_PATH
 from core.enums import Rol
 from services.database import sesion
 from services.eventos import AlertEvent, EventBus, default_bus
 
+# Injectable mail sender callable: (recipients, subject, body) -> success_bool
 SenderFn = Callable[[list[str], str, str], bool]
 
+# Spanish translations for user-facing email notifications
 SEVERITY_ES = {"red": "ROJA (Acción Inmediata)", "orange": "NARANJA", "yellow": "AMARILLA"}
 MODE_ES = {
     "standard": "Estándar",
@@ -27,8 +41,14 @@ MODE_ES = {
 }
 
 
+# =====================================================================
+# 1. DELIVERY CHANNELS (Strategy + Registry)
+# =====================================================================
+
 @dataclass(frozen=True)
 class NotificationPayload:
+    """Formatted notification message in Spanish ready for delivery."""
+
     alert_id: int
     recipients: list[str]
     subject: str
@@ -43,7 +63,7 @@ class DeliveryChannel(ABC):
 
     @abstractmethod
     def deliver(self, payload: NotificationPayload, sender: SenderFn | None = None) -> bool:
-        raise NotImplementedError
+        """Delivers the payload and returns True on success."""
 
 
 def smtp_send(
@@ -56,7 +76,7 @@ def smtp_send(
     user: str | None = None,
     password: str | None = None,
 ) -> bool:
-    """Sends an email via Gmail SMTP SSL (returns False if credentials are not configured)."""
+    """Default synchronous Gmail SMTP SSL sender (fails gracefully if unconfigured)."""
     if not recipients or not user or not password:
         return False
     msg = EmailMessage()
@@ -71,23 +91,30 @@ def smtp_send(
 
 
 class EmailChannel(DeliveryChannel):
+    """Sends notifications via email using the injected `sender` or `smtp_send`."""
+
     name = "email"
 
     def deliver(self, payload: NotificationPayload, sender: SenderFn | None = None) -> bool:
-        if not payload.recipients:
-            return False
-        return bool((sender or smtp_send)(payload.recipients, payload.subject, payload.body))
+        return bool(payload.recipients and (sender or smtp_send)(payload.recipients, payload.subject, payload.body))
 
 
 class LogChannel(DeliveryChannel):
+    """No-op / audit channel for local dry runs without SMTP traffic."""
+
     name = "log"
 
     def deliver(self, payload: NotificationPayload, sender: SenderFn | None = None) -> bool:
         return bool(payload.subject and payload.body)
 
 
+# Global registry of delivery channel strategies
 CHANNELS: dict[str, DeliveryChannel] = {c.name: c for c in (EmailChannel(), LogChannel())}
 
+
+# =====================================================================
+# 2. MESSAGE COMPOSER & OBSERVER HANDLER
+# =====================================================================
 
 def build_message(
     event: AlertEvent,
@@ -95,16 +122,13 @@ def build_message(
     *,
     now: datetime | None = None,
 ) -> NotificationPayload:
-    """Formats the clinical alert notification in Spanish for the astronaut and flight surgeon."""
-    stamp = now or datetime.now(UTC)
+    """Builds the Spanish notification for the astronaut and flight surgeons."""
     draft = event.alert
     sev = SEVERITY_ES.get(draft.severity, draft.severity.upper())
     mode = MODE_ES.get(draft.sampling_mode_triggered, draft.sampling_mode_triggered)
     name = event.astronaut.get("full_name", "Tripulante")
-    astro_email = event.astronaut.get("email", "")
-
-    recipients = [e for e in [astro_email, *doctor_emails] if e]
-    recipients = list(dict.fromkeys(recipients))
+    # Deduplicate emails while preserving order (astronaut first, then doctors)
+    recipients = list(dict.fromkeys(e for e in [event.astronaut.get("email", ""), *doctor_emails] if e))
 
     subject = f"[Astro-Health] Alerta {sev} - {name} (Día {draft.mission_day})"
     body = (
@@ -117,9 +141,7 @@ def build_message(
         f"Modo de muestreo activado: {mode}\n\n"
         f"Plan de acción:\n{draft.action_plan_text}\n"
     )
-    return NotificationPayload(
-        alert_id=event.alert_id, recipients=recipients, subject=subject, body=body, sent_at=stamp
-    )
+    return NotificationPayload(event.alert_id, recipients, subject, body, now or datetime.now(UTC))
 
 
 def send_alert_notification(
@@ -130,16 +152,15 @@ def send_alert_notification(
     channel: str = "email",
     now: datetime | None = None,
 ) -> bool:
-    """Handles an `AlertEvent` idempotently: sends once and sets `alerts.email_sent = 1`."""
+    """Dispatches an `AlertEvent` once and updates `alerts.email_sent = 1`."""
     with sesion(db_path) as db:
         stored = db.alertas.obtener(event.alert_id)
+        # Skip if alert does not exist or was already emailed (idempotent)
         if stored is None or stored.get("email_sent"):
             return False
         doctors = [u["email"] for u in db.usuarios.por_rol(Rol.DOCTOR)]
 
-    payload = build_message(event, doctors, now=now)
-    strategy = CHANNELS[channel]
-    if not strategy.deliver(payload, sender=sender):
+    if not CHANNELS[channel].deliver(build_message(event, doctors, now=now), sender=sender):
         return False
 
     with sesion(db_path) as db:
@@ -155,8 +176,7 @@ def subscribe_notifications(
     channel: str = "email",
     now: datetime | None = None,
 ) -> Callable[[], None]:
-    """Subscribes the notification handler to `bus` and returns the unsubscribe callable."""
-    def _handler(event: AlertEvent) -> None:
-        send_alert_notification(event, db_path=db_path, sender=sender, channel=channel, now=now)
-
-    return bus.subscribe(_handler)
+    """Subscribes the notification handler to `bus` and returns the unsubscribe function."""
+    return bus.subscribe(
+        lambda event: send_alert_notification(event, db_path=db_path, sender=sender, channel=channel, now=now)
+    )
