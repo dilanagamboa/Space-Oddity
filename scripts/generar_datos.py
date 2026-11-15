@@ -36,7 +36,6 @@ Run from the repo root::
     python -m scripts.generar_datos --environment lunar --seed 7
 """
 
-
 from __future__ import annotations
 
 import argparse
@@ -82,7 +81,7 @@ def _seed_people_and_mission(db: Repositorios, config: MissionConfig) -> list[tu
     id_mission = db.misiones.insertar(
         name=config.name, start_date=config.start_date,
         end_date=mission_date(config.start_date, config.days),
-        description=f"Misión de demostración ({config.environment}), {config.days} días.",
+        description=f"Demo mission ({config.environment}), {config.days} days.",
     )
 
     crew_ids: list[tuple[int, int]] = []
@@ -95,13 +94,15 @@ def _seed_people_and_mission(db: Repositorios, config: MissionConfig) -> list[tu
         )
         db.asignaciones.insertar(id_doctor=id_doctor, id_mission_log=id_log)
         db.pastillas.insertar(
-            id_user=id_user, assigned_by=id_doctor, name="Vitamina D3", dose="1000 UI",
-            description="Suplemento diario estándar en vuelo.", scheduled_time=time(8, 0),
+            id_user=id_user, assigned_by=id_doctor, name="Vitamina D3", dose="1000 IU",
+            description="Standard daily inflight supplement.", scheduled_time=time(8, 0),
             start_date=config.start_date,
         )
         for name, meal_type, kcal, protein, hm in (
-            ("Desayuno", "breakfast", 600, 30, (7, 0)), ("Almuerzo", "lunch", 800, 35, (12, 30)),
-            ("Merienda", "snack", 300, 10, (16, 30)), ("Cena", "dinner", 800, 35, (19, 0)),
+            ("Breakfast", "breakfast", 600, 30, (7, 0)),
+            ("Lunch", "lunch", 800, 35, (12, 30)),
+            ("Afternoon snack", "snack", 300, 10, (16, 30)),
+            ("Dinner", "dinner", 800, 35, (19, 0)),
         ):
             db.comidas.insertar(id_user=id_user, name=name, meal_type=meal_type,
                                 target_calories_kcal=kcal, target_protein_g=protein,
