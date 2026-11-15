@@ -28,7 +28,7 @@ from core.enums import Rol
 from services.database import sesion
 from services.eventos import AlertEvent, EventBus, default_bus
 
-# Injectable mail sender callable: (recipients, subject, body) -> success_bool
+# Type alias for injectable mail sender callable: (recipients, subject, body) -> bool
 SenderFn = Callable[[list[str], str, str], bool]
 
 # Spanish translations for user-facing email notifications
@@ -47,7 +47,7 @@ MODE_ES = {
 
 @dataclass(frozen=True)
 class NotificationPayload:
-    """Formatted notification message in Spanish ready for delivery."""
+    """Immutable value object holding the Spanish notification ready for dispatch."""
 
     alert_id: int
     recipients: list[str]
@@ -57,7 +57,7 @@ class NotificationPayload:
 
 
 class DeliveryChannel(ABC):
-    """Base strategy for a notification delivery channel."""
+    """Abstract base strategy for a notification delivery channel."""
 
     name: ClassVar[str]
 
@@ -76,7 +76,7 @@ def smtp_send(
     user: str | None = None,
     password: str | None = None,
 ) -> bool:
-    """Default synchronous Gmail SMTP SSL sender (fails gracefully if unconfigured)."""
+    """Default synchronous Gmail SMTP SSL sender (returns False if unconfigured)."""
     if not recipients or not user or not password:
         return False
     msg = EmailMessage()
@@ -91,16 +91,17 @@ def smtp_send(
 
 
 class EmailChannel(DeliveryChannel):
-    """Sends notifications via email using the injected `sender` or `smtp_send`."""
+    """Delivers notifications via email using the injected `sender` or `smtp_send`."""
 
     name = "email"
 
     def deliver(self, payload: NotificationPayload, sender: SenderFn | None = None) -> bool:
+        # Delegate to injected test/custom sender if provided, otherwise use default SMTP
         return bool(payload.recipients and (sender or smtp_send)(payload.recipients, payload.subject, payload.body))
 
 
 class LogChannel(DeliveryChannel):
-    """No-op / audit channel for local dry runs without SMTP traffic."""
+    """Audit / dry-run channel that validates payload content without network calls."""
 
     name = "log"
 
@@ -122,12 +123,13 @@ def build_message(
     *,
     now: datetime | None = None,
 ) -> NotificationPayload:
-    """Builds the Spanish notification for the astronaut and flight surgeons."""
+    """Composes the Spanish notification subject and body for astronaut and doctors."""
     draft = event.alert
     sev = SEVERITY_ES.get(draft.severity, draft.severity.upper())
     mode = MODE_ES.get(draft.sampling_mode_triggered, draft.sampling_mode_triggered)
     name = event.astronaut.get("full_name", "Tripulante")
-    # Deduplicate emails while preserving order (astronaut first, then doctors)
+
+    # Combine astronaut email and flight surgeon emails without duplicates
     recipients = list(dict.fromkeys(e for e in [event.astronaut.get("email", ""), *doctor_emails] if e))
 
     subject = f"[Astro-Health] Alerta {sev} - {name} (Día {draft.mission_day})"
@@ -152,17 +154,20 @@ def send_alert_notification(
     channel: str = "email",
     now: datetime | None = None,
 ) -> bool:
-    """Dispatches an `AlertEvent` once and updates `alerts.email_sent = 1`."""
+    """Handles an `AlertEvent` idempotently: sends once and marks `alerts.email_sent = 1`."""
+    # 1. Check DB state and fetch doctor emails (one doctor role sees the whole crew)
     with sesion(db_path) as db:
         stored = db.alertas.obtener(event.alert_id)
-        # Skip if alert does not exist or was already emailed (idempotent)
+        # Idempotency guard: abort if alert is missing or already sent
         if stored is None or stored.get("email_sent"):
             return False
         doctors = [u["email"] for u in db.usuarios.por_rol(Rol.DOCTOR)]
 
+    # 2. Build Spanish payload and dispatch via the chosen channel strategy
     if not CHANNELS[channel].deliver(build_message(event, doctors, now=now), sender=sender):
         return False
 
+    # 3. Persist email_sent = 1 so re-processing never sends duplicate emails
     with sesion(db_path) as db:
         db.alertas.actualizar(event.alert_id, email_sent=1)
     return True
@@ -176,7 +181,7 @@ def subscribe_notifications(
     channel: str = "email",
     now: datetime | None = None,
 ) -> Callable[[], None]:
-    """Subscribes the notification handler to `bus` and returns the unsubscribe function."""
+    """Subscribes `send_alert_notification` to `bus` (Observer) and returns unsubscribe callable."""
     return bus.subscribe(
         lambda event: send_alert_notification(event, db_path=db_path, sender=sender, channel=channel, now=now)
     )
