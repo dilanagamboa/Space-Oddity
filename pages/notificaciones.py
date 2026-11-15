@@ -3,7 +3,8 @@
 import streamlit as st
 
 from components.navegacion import current_user, is_doctor
-from components.paciente import SEVERITY_LABEL, assignment_page
+from components.paciente import assignment_page
+from components.widgets import tarjeta_alerta
 from core.enums import EstadoRecordatorio
 from services.recordatorios import complete_reminder
 from services.vistas import log_of_user, my_notifications
@@ -30,7 +31,6 @@ if not feed["reminders"]:
 
 st.subheader("Health alerts")
 for alert in feed["alerts"]:
-    st.markdown(f"{SEVERITY_LABEL[alert['severity']]} · **{alert['title']}** · day {alert['mission_day']}  \n"
-                f"{alert['action_plan_text']}")
+    tarjeta_alerta(alert)
 if not feed["alerts"]:
     st.caption("No open alerts.")
