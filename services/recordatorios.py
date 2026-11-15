@@ -121,7 +121,7 @@ class UserItemStrategy(ReminderStrategy):
 
     @abstractmethod
     def _format(self, item: Mapping[str, Any]) -> tuple[str, str]:
-        """(title, instructions) in Spanish for the item."""
+        """(title, instructions) in English for the item."""
 
 
 class PillStrategy(UserItemStrategy):
@@ -131,7 +131,7 @@ class PillStrategy(UserItemStrategy):
 
     def _format(self, item: Mapping[str, Any]) -> tuple[str, str]:
         dose = f" ({item['dose']})" if item.get("dose") else ""
-        return f"Medicamento: {item['name']}{dose}", str(item.get("description") or "Tomar con agua.")
+        return f"Medication: {item['name']}{dose}", str(item.get("description") or "Take with water.")
 
 
 class MealStrategy(UserItemStrategy):
@@ -141,8 +141,8 @@ class MealStrategy(UserItemStrategy):
 
     def _format(self, item: Mapping[str, Any]) -> tuple[str, str]:
         kcal, protein = item.get("target_calories_kcal"), item.get("target_protein_g")
-        target = f" ({kcal:.0f} kcal, {protein:.0f} g proteína)" if kcal and protein else ""
-        return f"Comida: {item['name']}", f"Registrar ingesta calórica{target}."
+        target = f" ({kcal:.0f} kcal, {protein:.0f} g protein)" if kcal and protein else ""
+        return f"Meal: {item['name']}", f"Log caloric intake{target}."
 
 
 class NoticeStrategy(UserItemStrategy):
@@ -172,28 +172,28 @@ class SamplingStrategy(ReminderStrategy):
 
 class GlucoseStrategy(SamplingStrategy):
     reminder_type = TipoRecordatorio.MUESTRA_GLUCOSA
-    title = "Muestra de glucosa capilar"
+    title = "Capillary blood glucose sample"
     schedules = {
         ModoMonitoreo.ALERTA_INFECCION: (                   # 6/day, intensive sepsis monitoring
-            (GLUCOSE_FASTING_AT, "Glucosa en ayunas (protocolo intensivo de infección)."),
-            ((9, 30), "Glucosa 2 h post-desayuno."),
-            ((12, 0), "Glucosa pre-almuerzo."),
-            ((14, 30), "Glucosa 2 h post-almuerzo."),
-            ((18, 30), "Glucosa pre-cena."),
-            ((21, 30), "Glucosa nocturna."),
+            (GLUCOSE_FASTING_AT, "Fasting blood glucose (intensive infection protocol)."),
+            ((9, 30), "Blood glucose 2 h post-breakfast."),
+            ((12, 0), "Pre-lunch blood glucose."),
+            ((14, 30), "Blood glucose 2 h post-lunch."),
+            ((18, 30), "Pre-dinner blood glucose."),
+            ((21, 30), "Nighttime blood glucose."),
         ),
         ModoMonitoreo.ALERTA_ATROFIA: (                     # 2/day, metabolic check
-            (GLUCOSE_FASTING_AT, "Glucosa en ayunas (control metabólico por atrofia)."),
-            ((14, 30), "Glucosa 2 h post-almuerzo."),
+            (GLUCOSE_FASTING_AT, "Fasting blood glucose (atrophy metabolic check)."),
+            ((14, 30), "Blood glucose 2 h post-lunch."),
         ),
         ModoMonitoreo.ALERTA_CIRCADIANA: (                  # 2/day, circadian check
-            (GLUCOSE_FASTING_AT, "Glucosa en ayunas (control circadiano)."),
-            ((20, 30), "Glucosa 2 h post-cena."),
+            (GLUCOSE_FASTING_AT, "Fasting blood glucose (circadian check)."),
+            ((20, 30), "Blood glucose 2 h post-dinner."),
         ),
         ModoMonitoreo.ESTANDAR: (                           # Team sampling plan (core.protocolo)
-            (GLUCOSE_FASTING_AT, "Glucosa capilar en ayunas."),
-            *zip(GLUCOSE_POST_MEAL_AT, ("Glucosa 2 h post-desayuno.", "Glucosa 2 h post-almuerzo.",
-                                        "Glucosa 2 h post-cena."), strict=True),
+            (GLUCOSE_FASTING_AT, "Fasting capillary blood glucose."),
+            *zip(GLUCOSE_POST_MEAL_AT, ("Blood glucose 2 h post-breakfast.", "Blood glucose 2 h post-lunch.",
+                                        "Blood glucose 2 h post-dinner."), strict=True),
         ),
     }
 
@@ -203,23 +203,23 @@ class GlucoseStrategy(SamplingStrategy):
 
 class SalivaStrategy(SamplingStrategy):
     reminder_type = TipoRecordatorio.MUESTRA_SALIVA
-    title = "Muestra de saliva"
+    title = "Saliva biomarker sample"
     _FOUR_POINT: ClassVar[Slots] = tuple(zip(SALIVA_AT.values(), (
-        "Saliva al despertar (0 min).",
-        "Saliva +30 min post-despertar (curva CAR).",
-        "Saliva de tarde (cortisol y sAA).",
-        "Saliva antes de dormir (ratio Cortisol/DHEA).",
+        "Saliva upon awakening (0 min).",
+        "Saliva +30 min post-awakening (CAR curve).",
+        "Afternoon saliva (cortisol and sAA).",
+        "Bedtime saliva (Cortisol/DHEA ratio).",
     ), strict=True))
     schedules = {
         ModoMonitoreo.ALERTA_CIRCADIANA: _FOUR_POINT,
         ModoMonitoreo.ALERTA_INFECCION: (
-            (SALIVA_AT["wake_0m"], "Saliva matutina (inmunología/sAA)."),
-            ((15, 0), "Saliva vespertina."),
-            (SALIVA_AT["bedtime"], "Saliva nocturna."),
+            (SALIVA_AT["wake_0m"], "Morning saliva (immunology/sAA)."),
+            ((15, 0), "Afternoon saliva."),
+            (SALIVA_AT["bedtime"], "Nighttime saliva."),
         ),
         ModoMonitoreo.ALERTA_ATROFIA: (
-            (SALIVA_AT["wake_0m"], "Saliva matutina (balance C/DHEA)."),
-            (SALIVA_AT["bedtime"], "Saliva nocturna."),
+            (SALIVA_AT["wake_0m"], "Morning saliva (C/DHEA balance)."),
+            (SALIVA_AT["bedtime"], "Nighttime saliva."),
         ),
         ModoMonitoreo.ESTANDAR: _FOUR_POINT,
     }
@@ -234,10 +234,10 @@ class SalivaStrategy(SamplingStrategy):
 
 class BiaChairStrategy(SamplingStrategy):
     reminder_type = TipoRecordatorio.PESAJE_BIA
-    title = "Medición en silla de bioimpedancia (BIA)"
+    title = "Bioimpedance chair (BIA) measurement"
     schedules = {
         ModoMonitoreo.ESTANDAR: (
-            (CHAIR_AT, "Medir composición corporal en ayunas (masa, % músculo y grasa visceral)."),
+            (CHAIR_AT, "Measure fasting body composition (mass, % muscle and visceral fat)."),
         ),
     }
 
@@ -323,4 +323,3 @@ def overdue_pill_reminders(
     with sesion(db_path) as db:
         pending = db.recordatorios.pendientes_hasta(id_mission_log, limit)
     return [r for r in pending if r["reminder_type"] == TipoRecordatorio.PASTILLA]
-
