@@ -1,4 +1,4 @@
-# Space Eddus
+# Space Edus
 
 Health monitoring software for astronauts on long-duration missions, built for the **NASA Space Apps Challenge 2026** ("Create Health Monitoring Software for Astronauts on Space Missions"). Repository: `Space-Oddity`.
 
