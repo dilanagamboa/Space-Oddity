@@ -70,6 +70,14 @@ CAR_MEAN_INCREASE: float = 0.50       # Wüst 2000: about +50 % at 30 min
 FEVER_HR_BPM_PER_C: float = 8.5       # Karjalainen 1986
 LUTEAL_SKIN_TEMP_C: float = 0.3       # Physiological luteal rise (+0.3 to +0.5 °C)
 
+# Day-to-day variability of nocturnal values (team assumption, in line with the ~10 %
+# day-to-day variation of ln RMSSD reported for healthy adults). Without it the
+# personal baselines would have an unrealistically small standard deviation.
+DAILY_HRV_LOG_SD: float = 0.10
+DAILY_HR_SD_BPM: float = 1.8
+DAILY_SKIN_TEMP_SD_C: float = 0.08
+DAILY_RR_SD_RPM: float = 0.4
+
 REFERENCE_VALUES: tuple[dict[str, Any], ...] = (
     {"parameter": "sleep_hours", "context": "iss_mean", "value": 6.09, "unit": "h",
      "source_name": "Barger LK et al. Lancet Neurol 2014",
@@ -304,6 +312,16 @@ class MeasurementGenerator:
         return getattr(repos, self.repo).insertar_varios(rows)
 
 
+@dataclass(frozen=True)
+class DailyOffsets:
+    """Random shift of one day applied to every watch block of that day."""
+
+    hr: float
+    hrv_factor: float
+    temp: float
+    rr: float
+
+
 class CardiovascularGenerator(MeasurementGenerator):
     """Watch data every 15 min. Sleep window 22:00-06:00 UTC, exercise 08:00 and 15:00."""
 
@@ -321,6 +339,12 @@ class CardiovascularGenerator(MeasurementGenerator):
             mods = ctx.scenario.modifiers(day)
             sleep_stages = self._sleep_stages(ctx, mods)
             luteal = LUTEAL_SKIN_TEMP_C if ctx.is_luteal(day) else 0.0
+            daily = DailyOffsets(
+                hr=ctx.rng.gauss(0, DAILY_HR_SD_BPM),
+                hrv_factor=math.exp(ctx.rng.gauss(0, DAILY_HRV_LOG_SD)),
+                temp=ctx.rng.gauss(0, DAILY_SKIN_TEMP_SD_C),
+                rr=ctx.rng.gauss(0, DAILY_RR_SD_RPM),
+            )
             start = ctx.at(day, 0)
             for block in range(self.BLOCKS_PER_DAY):
                 moment = start + timedelta(minutes=15 * block)
@@ -328,7 +352,7 @@ class CardiovascularGenerator(MeasurementGenerator):
                 in_window = block >= self.SLEEP_START_BLOCK or block < 24
                 asleep = in_window and stage > 0
                 intensity = 0 if in_window else self._activity(ctx, day, moment.hour)
-                rows.append(self._row(ctx, day, moment, stage, asleep, intensity, mods, luteal))
+                rows.append(self._row(ctx, day, moment, stage, asleep, intensity, mods, luteal, daily))
         return rows
 
     def _sleep_stages(self, ctx: AstronautContext, mods: Modifiers) -> dict[int, int]:
@@ -355,18 +379,19 @@ class CardiovascularGenerator(MeasurementGenerator):
         return 1 if ctx.rng.random() < 0.7 else 0
 
     def _row(self, ctx: AstronautContext, day: int, moment: datetime, stage: int, asleep: bool,
-             intensity: int, mods: Modifiers, luteal: float) -> dict[str, Any]:
+             intensity: int, mods: Modifiers, luteal: float, daily: DailyOffsets) -> dict[str, Any]:
         p = ctx.profile
         hr_delta, hrv_factor, rr_delta, enmo_mean = self.ACTIVITY[intensity]
         if asleep:
             hr_delta, hrv_factor, rr_delta, enmo_mean = -6, 1.2, -1.5, 2.0
 
-        hr = ctx.gauss(p.resting_hr_bpm + hr_delta + mods.hr_bpm, 2.5, 40, 190)
-        rmssd = p.rmssd_ms * hrv_factor * mods.hrv_factor * math.exp(ctx.rng.gauss(0, 0.12))
+        hr = ctx.gauss(p.resting_hr_bpm + hr_delta + mods.hr_bpm + daily.hr, 2.5, 40, 190)
+        rmssd = (p.rmssd_ms * hrv_factor * mods.hrv_factor * daily.hrv_factor
+                 * math.exp(ctx.rng.gauss(0, 0.12)))
         systolic = ctx.gauss(114 + 7 * intensity - (6 if asleep else 0), 4, 90, 200)
         diastolic = ctx.gauss(73 + 2.5 * intensity - (4 if asleep else 0), 3, 50, 125)
         skin_base = 33.6 + (0.8 if asleep else 0.0)
-        skin = ctx.gauss(skin_base + luteal + mods.temp_c, 0.15)
+        skin = ctx.gauss(skin_base + luteal + mods.temp_c + daily.temp, 0.15)
         sample_block = asleep and moment.hour == 2 and moment.minute == 0
         rr_intervals = self._rr_sample(ctx, hr, rmssd) if sample_block else None
 
@@ -382,7 +407,7 @@ class CardiovascularGenerator(MeasurementGenerator):
             "estimated_map_mmhg": round(diastolic + (systolic - diastolic) / 3, 1),
             "spo2_pct": round(ctx.gauss(97.8 + mods.spo2_pct, 0.6, 85, 100), 1),
             "perfusion_index_pct": round(ctx.gauss(3.0, 0.8, 0.5, 10), 2),
-            "respiratory_rate_rpm": round(ctx.gauss(14 + rr_delta + mods.rr_rpm, 1.0, 8, 40), 1),
+            "respiratory_rate_rpm": round(ctx.gauss(14 + rr_delta + mods.rr_rpm + daily.rr, 1.0, 8, 40), 1),
             "skin_temperature_c": round(skin, 2),
             "skin_temp_deviation_c": round(skin - skin_base, 2),
             "sleep_stage": stage if asleep else 0,
@@ -449,7 +474,7 @@ class SalivaGenerator(MeasurementGenerator):
             if day % 7 != self.SALIVA_DAY:
                 continue
             mods = ctx.scenario.modifiers(day)
-            wake = ctx.gauss(14.0, 2.0, 8, 24)
+            wake = ctx.gauss(13.0, 1.8, 8, 20)
             if mods.blunted_car:
                 car_factor = ctx.gauss(1.12, 0.04)
             else:
