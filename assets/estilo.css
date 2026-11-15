@@ -3,6 +3,8 @@
 /* Narrow icon bar with big icons; avatar and log out pinned at the bottom */
 section[data-testid="stSidebar"] { width: 92px !important; min-width: 92px !important; }
 section[data-testid="stSidebar"] button p { font-size: 2rem; }
+[class*="st-key-icon_"] button { height: 3.4rem; background: center / 2.6rem no-repeat; }
+[class*="st-key-icon_"] button p { visibility: hidden; }
 .st-key-nav_bottom { position: fixed; bottom: 1rem; width: 60px; }
 
 /* Headings in the serif font of the design, without bold */

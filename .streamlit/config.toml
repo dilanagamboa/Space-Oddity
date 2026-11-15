@@ -16,3 +16,6 @@ textColor = "#0E1A23"
 
 [client]
 toolbarMode = "viewer"                   # Hides "Deploy"
+
+[server]
+enableStaticServing = true               # Serves static/ (menu icons) at app/static/

@@ -1,5 +1,6 @@
 streamlit>=1.50
 requests>=2.32
+plotly>=5.20
 
 # Desarrollo
 pytest>=8.0

@@ -11,7 +11,7 @@ from components.navegacion import build_navigation, current_user
 from components.sidebar import render_sidebar
 from config import BASE_DIR
 
-st.set_page_config(page_title="Space Oddity", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="Space Eddus", page_icon="🚀", layout="wide")
 st.html(BASE_DIR / "assets" / "estilo.css")          # Figma layout details the theme cannot express
 
 user = current_user()
