@@ -1,4 +1,17 @@
-"""Daily reminder service using Strategy + Registry patterns."""
+"""Daily reminder service using Strategy + Registry patterns.
+
+Reads `mission_logs.active_monitoring_mode` and schedules daily reminders for
+medications (`pill`), meals (`meal`), and clinical sampling (`glucose`,
+`saliva`, `bia_chair`).
+
+Patterns:
+    * **Strategy + Registry**: `UserItemStrategy` handles user-prescribed items
+      (`pills`, `meals`) and `SamplingStrategy` handles clinical sampling schedules
+      driven by `active_monitoring_mode`. Every concrete strategy is registered in
+      `STRATEGIES`. `task` reminders are never created (`id_task = None`).
+    * **Idempotent**: running `generate_daily_reminders` twice on the same day
+      never duplicates rows.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +27,10 @@ from services.database import sesion
 
 Row = dict[str, Any]
 
+
+# =====================================================================
+# 1. PLANNING CONTEXT & HELPERS
+# =====================================================================
 
 @dataclass(frozen=True)
 class PlanningContext:
@@ -34,7 +51,7 @@ class PlanningContext:
             "reminder_type": r_type,
             "id_pill": id_pill,
             "id_meal": id_meal,
-            "id_task": None,
+            "id_task": None,                  # Always NULL per team architecture agreement
             "title": title,
             "instructions": instructions,
             "monitoring_mode": self.mode,
@@ -46,7 +63,7 @@ class PlanningContext:
 
 
 def _hm(val: Any) -> tuple[int, int]:
-    """Extracts (hour, minute) from a `time` object or 'HH:MM' string."""
+    """Extracts (hour, minute) from a `datetime.time` object or 'HH:MM' string."""
     if isinstance(val, time):
         return val.hour, val.minute
     h, m, *_ = str(val).strip().split(":")
@@ -54,17 +71,17 @@ def _hm(val: Any) -> tuple[int, int]:
 
 
 # =====================================================================
-# 1. STRATEGIES & REGISTRY (No duplicate loops or dead branches)
+# 2. STRATEGIES & REGISTRY
 # =====================================================================
 
 class ReminderStrategy(ABC):
-    """Base strategy registered automatically in `STRATEGIES`."""
+    """Base strategy registered in `STRATEGIES`."""
 
     reminder_type: ClassVar[str]
 
     @abstractmethod
     def build(self, ctx: PlanningContext) -> list[Row]:
-        """Returns the reminders for `ctx.mission_day`."""
+        """Returns the candidate reminder rows for `ctx.mission_day`."""
 
 
 class UserItemStrategy(ReminderStrategy):
@@ -75,6 +92,7 @@ class UserItemStrategy(ReminderStrategy):
 
     def build(self, ctx: PlanningContext) -> list[Row]:
         items: Sequence[Mapping[str, Any]] = getattr(ctx, self.source_attr)
+        # Filter active items whose frequency cycle matches the current mission day
         return [
             ctx.row(self.reminder_type, _hm(item["scheduled_time"]), *self._format(item),
                     **{self.fk_field: int(item["id"])})
@@ -88,6 +106,8 @@ class UserItemStrategy(ReminderStrategy):
 
 
 class PillStrategy(UserItemStrategy):
+    """Medication reminders from the astronaut's `pills` table."""
+
     reminder_type = "pill"
     source_attr = "pills"
     fk_field = "id_pill"
@@ -98,6 +118,8 @@ class PillStrategy(UserItemStrategy):
 
 
 class MealStrategy(UserItemStrategy):
+    """Nutritional reminders from the astronaut's `meals` table."""
+
     reminder_type = "meal"
     source_attr = "meals"
     fk_field = "id_meal"
@@ -115,6 +137,7 @@ class SamplingStrategy(ReminderStrategy):
     schedules: ClassVar[dict[str, tuple[tuple[tuple[int, int], str], ...]]]
 
     def is_active_day(self, ctx: PlanningContext) -> bool:
+        """Whether this sampling type should be scheduled on `ctx.mission_day`."""
         return True
 
     def build(self, ctx: PlanningContext) -> list[Row]:
@@ -125,10 +148,12 @@ class SamplingStrategy(ReminderStrategy):
 
 
 class GlucoseStrategy(SamplingStrategy):
+    """Capillary blood glucose reminders adapted to `active_monitoring_mode`."""
+
     reminder_type = "glucose"
     title = "Muestra de glucosa capilar"
     schedules = {
-        "alert_infection": (
+        "alert_infection": (  # 6x/day intensive sepsis monitoring
             ((6, 30), "Glucosa en ayunas (protocolo intensivo de infección)."),
             ((9, 30), "Glucosa 2 h post-desayuno."),
             ((12, 0), "Glucosa pre-almuerzo."),
@@ -136,15 +161,15 @@ class GlucoseStrategy(SamplingStrategy):
             ((18, 30), "Glucosa pre-cena."),
             ((21, 30), "Glucosa nocturna."),
         ),
-        "alert_atrophy": (
+        "alert_atrophy": (    # 2x/day metabolic/insulin check
             ((6, 30), "Glucosa en ayunas (control metabólico por atrofia)."),
             ((14, 30), "Glucosa 2 h post-almuerzo."),
         ),
-        "alert_circadian": (
+        "alert_circadian": (  # 2x/day circadian check
             ((6, 30), "Glucosa en ayunas (control circadiano)."),
             ((20, 30), "Glucosa 2 h post-cena."),
         ),
-        "standard": (
+        "standard": (         # 4x/day on standard glucose days (2 days/week)
             ((6, 30), "Glucosa capilar en ayunas."),
             ((9, 30), "Glucosa 2 h post-desayuno."),
             ((14, 30), "Glucosa 2 h post-almuerzo."),
@@ -153,10 +178,13 @@ class GlucoseStrategy(SamplingStrategy):
     }
 
     def is_active_day(self, ctx: PlanningContext) -> bool:
+        # In standard mode, sample only on days 1 and 4 of each 7-day cycle (matches BloodGenerator)
         return ctx.mode != "standard" or (ctx.mission_day % 7 in (1, 4))
 
 
 class SalivaStrategy(SamplingStrategy):
+    """Salivary biomarker (Cortisol, DHEA, sAA) reminders adapted to `active_monitoring_mode`."""
+
     reminder_type = "saliva"
     title = "Muestra de saliva"
     _FOUR_POINT = (
@@ -181,13 +209,15 @@ class SalivaStrategy(SamplingStrategy):
 
     def is_active_day(self, ctx: PlanningContext) -> bool:
         if ctx.mode == "standard":
-            return ctx.mission_day % 7 == 3
+            return ctx.mission_day % 7 == 3       # Weekly saliva day (matches SalivaGenerator)
         if ctx.mode == "alert_atrophy":
-            return (ctx.mission_day - 1) % 3 == 0
-        return True
+            return (ctx.mission_day - 1) % 3 == 0  # Every 3 days in atrophy mode
+        return True                               # Daily in infection and circadian modes
 
 
 class BiaChairStrategy(SamplingStrategy):
+    """Bioimpedance chair (BIA) reminders: daily in atrophy mode, weekly otherwise."""
+
     reminder_type = "bia_chair"
     title = "Medición en silla de bioimpedancia (BIA)"
     schedules = {
@@ -200,6 +230,7 @@ class BiaChairStrategy(SamplingStrategy):
         return ctx.mode == "alert_atrophy" or (ctx.mission_day % 7 == 1)
 
 
+# Global strategy registry (excludes 'task' by design)
 STRATEGIES: dict[str, ReminderStrategy] = {
     s.reminder_type: s
     for s in (PillStrategy(), MealStrategy(), GlucoseStrategy(), SalivaStrategy(), BiaChairStrategy())
@@ -207,11 +238,11 @@ STRATEGIES: dict[str, ReminderStrategy] = {
 
 
 # =====================================================================
-# 2. PUBLIC FUNCTIONS
+# 3. PUBLIC SERVICE ENTRY POINTS
 # =====================================================================
 
 def _key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Natural deduplication key for idempotency."""
+    """Natural deduplication key ensuring idempotency across re-runs."""
     return (row["reminder_type"], str(row["scheduled_at"])[:19], row.get("id_pill"), row.get("id_meal"))
 
 
@@ -271,7 +302,7 @@ def overdue_pill_reminders(
     db_path: Path | str = DB_PATH,
     now: datetime | None = None,
 ) -> list[Row]:
-    """Returns pending pill reminders that are >= `overdue_minutes` past `scheduled_at`."""
+    """Returns pending pill reminders that are >= `overdue_minutes` (60 min) past `scheduled_at`."""
     current = (now or datetime.now(UTC)).replace(tzinfo=None)
     limit = timedelta(minutes=overdue_minutes)
     with sesion(db_path) as db:
