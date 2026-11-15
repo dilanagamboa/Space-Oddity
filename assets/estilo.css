@@ -1,37 +1,97 @@
 /* Figma details that .streamlit/config.toml cannot express. Hooks: the st-key-NAME class of keyed containers. */
 
 /* Narrow icon bar with big icons; avatar and log out pinned at the bottom */
-section[data-testid="stSidebar"] { width: 92px !important; min-width: 92px !important; }
-section[data-testid="stSidebar"] button p { font-size: 2rem; }
-[class*="st-key-icon_"] button { height: 3.4rem; background: center / 2.6rem no-repeat; }
-[class*="st-key-icon_"] button p { visibility: hidden; }
-.st-key-nav_bottom { position: fixed; bottom: 1rem; width: 60px; }
+section[data-testid="stSidebar"] {
+  width: 92px !important;
+  min-width: 92px !important;
+}
+section[data-testid="stSidebar"] button p {
+  font-size: 2rem;
+}
+[class*="st-key-icon_"] button {
+  height: 3.4rem;
+  background: center / 2.6rem no-repeat;
+}
+[class*="st-key-icon_"] button [data-testid="stMarkdownContainer"] {
+  display: none;
+} /* Text kept only for the tooltip */
+.st-key-nav_bottom {
+  position: fixed;
+  bottom: 1rem;
+  width: 60px;
+}
 
 /* Headings in the serif font of the design, without bold */
-h1, h2, h3 { font-weight: 400 !important; }
+h1,
+h2,
+h3 {
+  font-weight: 400 !important;
+}
 
 /* Login: rounded picture and grey card with blue pill-shaped inputs */
-.st-key-login_image img { border-radius: 24px; border: 1px solid #2C3E57; }
-.st-key-login_card { background: #EFEFEF; border-radius: 40px; padding: 2.5rem 3rem; }
-.st-key-login_card input { background: #C5D8E3; border: 1px solid #2C3E57; border-radius: 999px; }
-.st-key-login_card [data-baseweb="input"], .st-key-login_card [data-baseweb="input"] div,
-.st-key-login_card [data-baseweb="input"] button { background: transparent; border-radius: 999px; }
-.st-key-forgot { display: flex; justify-content: flex-end; width: 100%; }
-.st-key-forgot button p { font-size: 0.85rem; }
+.st-key-login_image img {
+  border-radius: 24px;
+  border: 1px solid #2c3e57;
+}
+.st-key-login_card {
+  background: #efefef;
+  border-radius: 40px;
+  padding: 2.5rem 3rem;
+}
+.st-key-login_card input {
+  background: #c5d8e3;
+  border: 1px solid #2c3e57;
+  border-radius: 999px;
+}
+.st-key-login_card [data-baseweb="input"],
+.st-key-login_card [data-baseweb="input"] div,
+.st-key-login_card [data-baseweb="input"] button {
+  background: transparent;
+  border-radius: 999px;
+}
+.st-key-forgot {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+.st-key-forgot button p {
+  font-size: 0.85rem;
+}
 
 /* Patients table header in light blue */
-.st-key-patients_header { background: #C5D8E3; border-radius: 0.4rem; padding: 0.4rem 0.6rem; }
+.st-key-patients_header {
+  background: #c5d8e3;
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.6rem;
+}
 
 /* Sections: orange tab with the arrow, as in the design */
-[data-testid="stExpander"] details { border: none; border-bottom: 6px solid #E6E6E6; border-radius: 0; }
-[data-testid="stExpander"] summary, [data-testid="stExpander"] summary:hover {
-    background: #FF9466 !important; color: #FFFFFF !important; width: fit-content; min-width: 14rem;
-    border-radius: 0.3rem;
+[data-testid="stExpander"] details {
+  border: none;
+  border-bottom: 6px solid #e6e6e6;
+  border-radius: 0;
 }
-[data-testid="stExpander"] summary * { color: #FFFFFF !important; }
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary:hover {
+  background: #ff9466 !important;
+  color: #ffffff !important;
+  width: fit-content;
+  min-width: 14rem;
+  border-radius: 0.3rem;
+}
+[data-testid="stExpander"] summary * {
+  color: #ffffff !important;
+}
 
 /* Secondary dark button (Discard) */
-.st-key-discard button { background: #2C3E57; color: #FFFFFF; border: none; }
+.st-key-discard button {
+  background: #2c3e57;
+  color: #ffffff;
+  border: none;
+}
 
 /* L-D weekday toggles as the square buttons of the design */
-[data-testid="stButtonGroup"] button { border-radius: 0.2rem; min-width: 2.2rem; }
+[data-testid="stButtonGroup"] button {
+  border-radius: 0.2rem;
+  min-width: 2.2rem;
+}
