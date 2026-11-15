@@ -185,16 +185,23 @@ class RepositorioBase:
         return int(cursor.lastrowid)
 
     def insertar_varios(self, filas: Sequence[Mapping[str, Any]]) -> int:
-        """Inserta muchas filas con las mismas columnas en un solo lote."""
-        if not filas:
-            return 0
-        nombres = list(filas[0])
-        self._validar(nombres)
-        sql = (
-            f"INSERT INTO {self.tabla} ({', '.join(nombres)}) "
-            f"VALUES ({', '.join('?' for _ in nombres)})"
-        )
-        self._conn.executemany(sql, ([_a_sql(f[n]) for n in nombres] for f in filas))
+        """Inserta muchas filas en lotes.
+
+        Las filas se agrupan por conjunto de columnas, de modo que filas con
+        columnas distintas (por ejemplo, glucosa sin hemoglobina) conservan los
+        valores por defecto del esquema en lo que no traen.
+        """
+        grupos: dict[tuple[str, ...], list[Mapping[str, Any]]] = {}
+        for fila in filas:
+            grupos.setdefault(tuple(fila), []).append(fila)
+
+        for nombres, grupo in grupos.items():
+            self._validar(nombres)
+            sql = (
+                f"INSERT INTO {self.tabla} ({', '.join(nombres)}) "
+                f"VALUES ({', '.join('?' for _ in nombres)})"
+            )
+            self._conn.executemany(sql, ([_a_sql(f[n]) for n in nombres] for f in grupo))
         return len(filas)
 
     def obtener(self, id_: int) -> Fila | None:
