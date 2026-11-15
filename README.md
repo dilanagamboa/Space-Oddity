@@ -2,6 +2,12 @@
 
 Health monitoring software for astronauts on long-duration missions, built for the **NASA Space Apps Challenge 2026** ("Create Health Monitoring Software for Astronauts on Space Missions"). Repository: `Space-Oddity`.
 
+**Live Demo:** [https://space-oddity.streamlit.app/](https://space-oddity.streamlit.app/)
+
+### Quick Access Credentials (Flight Surgeon)
+- **Email:** `laura.jimenez@spaceoddity.dev`
+- **Password:** `SpaceOddity2026`
+
 ## Summary
 
 Astronauts far from Earth have to spot health changes in themselves. Space Eddus gathers daily health indicators, compares each astronaut against their own baseline, and turns the result into a traffic-light status, a 0–100 readiness score and alerts with an action plan.
