@@ -1,20 +1,24 @@
-"""Inicializa el esquema SQLite de astro-health en data/astro.db."""
+"""Inicializa el esquema SQLite de Space Oddity.
+
+Ejecutar desde la raíz del repo::
+
+    python -m scripts.crear_db
+"""
 
 import sqlite3
 from pathlib import Path
 
-BASE_DIR: Path = Path(__file__).resolve().parent.parent
-SCHEMA_PATH: Path = BASE_DIR / "scripts" / "schema.sql"
-DB_PATH: Path = BASE_DIR / "data" / "astro.db"
+from config import SCHEMA_PATH, database_path
 
 
-def crear_base_datos(db_path: Path = DB_PATH, schema_path: Path = SCHEMA_PATH) -> None:
+def crear_base_datos(db_path: Path | None = None, schema_path: Path = SCHEMA_PATH) -> None:
     """Crea el archivo SQLite y ejecuta el DDL definido en schema.sql.
 
     Args:
-        db_path: Ruta destino del archivo astro.db.
+        db_path: Ruta destino. Por defecto, ``config.database_path()``.
         schema_path: Ruta al archivo schema.sql con las tablas e índices.
     """
+    db_path = Path(db_path or database_path())
     if not schema_path.exists():
         raise FileNotFoundError(f"No se encontró el archivo de esquema: {schema_path}")
 

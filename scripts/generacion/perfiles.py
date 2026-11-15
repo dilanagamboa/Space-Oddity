@@ -123,9 +123,7 @@ CREW: tuple[AstronautProfile, ...] = (
                      scenario="atrophy"),
 )
 
-DOCTORS: tuple[tuple[str, str], ...] = (
-    ("Dra. Laura Jiménez", "laura.jimenez@spaceoddity.dev"),
-    ("Dr. Esteban Quesada", "esteban.quesada@spaceoddity.dev"),
-)
+DOCTOR: tuple[str, str] = ("Dra. Laura Jiménez", "laura.jimenez@spaceoddity.dev")   # Single flight surgeon
 ADMIN: tuple[str, str] = ("Administración Space Oddity", "admin@spaceoddity.dev")
+DEMO_PASSWORD: str = "SpaceOddity2026"   # Shared by the demo accounts (each with its own salt)
 

@@ -9,6 +9,7 @@ Architecture rule: Importing streamlit or sqlite3 inside core/ is strictly forbi
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
@@ -34,6 +35,26 @@ def mission_moment(start: date | str, mission_day: int, at: HourMinute | time) -
 def weekday(mission_day: int) -> int:
     """Position of a mission day in the weekly sampling cycle (0-6)."""
     return mission_day % 7
+
+
+# Days of the week chosen with the L-D buttons, stored as a bit mask (L = bit 0 ... D = bit 6)
+WEEKDAY_LABELS = ("L", "K", "M", "J", "V", "S", "D")
+EVERY_DAY = 0b1111111
+
+
+def weekdays_mask(days: Iterable[int]) -> int:
+    """Bit mask of weekday indexes (0 = Monday)."""
+    return sum(1 << d for d in set(days))
+
+
+def weekdays_of(mask: int) -> list[int]:
+    """Weekday indexes (0 = Monday) in a bit mask."""
+    return [d for d in range(7) if mask >> d & 1]
+
+
+def runs_on(mask: int, day: date) -> bool:
+    """``True`` if a schedule with that mask happens on ``day``."""
+    return bool(mask >> day.weekday() & 1)
 
 
 # =====================================================================

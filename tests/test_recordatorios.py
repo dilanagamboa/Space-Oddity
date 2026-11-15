@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.enums import TipoRecordatorio
+from core.protocolo import mission_date, weekdays_mask
 from services.database import sesion
 from services.recordatorios import (
     STRATEGIES,
@@ -24,7 +25,7 @@ def db_path(mission_copy) -> Path:
 
 
 def test_registry_excludes_task() -> None:
-    """Verifies that all 5 valid strategies are registered and 'task' is excluded."""
+    """Verifies that all valid strategies are registered and 'task' is excluded."""
     assert set(STRATEGIES) == set(TipoRecordatorio) - {TipoRecordatorio.TAREA}
 
 
@@ -72,3 +73,15 @@ def test_overdue_pill_and_completion(db_path: Path) -> None:
     updated = complete_reminder(overdue["id"], db_path=db_path, now=datetime(2024, 5, 1, 9, 6, tzinfo=UTC))
     assert updated["status"] == "completed" and updated["completed_at"] is not None
     assert not overdue_pill_reminders(1, db_path=db_path, now=datetime(2024, 5, 1, 9, 30, tzinfo=UTC))
+
+
+def test_items_follow_their_weekdays(db_path: Path) -> None:
+    """A pill set to L and M only (Monday, Wednesday) is reminded only on those calendar days."""
+    with sesion(db_path) as db:
+        log = db.mission_logs.obtener(1)
+        id_pill = db.pastillas.activas_de(log["id_user"])[0]["id"]
+        db.pastillas.actualizar(id_pill, weekdays=weekdays_mask([0, 2]))
+    reminded = {mission_date(log["start_date"], day).weekday()
+                for day in range(1, 8)
+                for r in generate_daily_reminders(1, day, db_path=db_path) if r["id_pill"] == id_pill}
+    assert reminded == {0, 2}

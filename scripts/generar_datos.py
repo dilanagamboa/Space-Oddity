@@ -45,7 +45,7 @@ import random
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 
-from config import DB_PATH, SCHEMA_PATH
+from config import SCHEMA_PATH, database_path
 from core.enums import Rol, Sexo
 from core.protocolo import mission_date
 from scripts.crear_db import crear_base_datos
@@ -54,11 +54,13 @@ from scripts.generacion.perfiles import (
     ADMIN,
     CREW,
     DEFAULT_MISSION,
-    DOCTORS,
+    DEMO_PASSWORD,
+    DOCTOR,
     DOSE_RATE_MSV_DAY,
     REFERENCE_VALUES,
     MissionConfig,
 )
+from services.auth import hash_password
 from services.database import Repositorios, sesion
 from services.radiacion_api import solar_event_days, sync_space_weather
 
@@ -71,14 +73,12 @@ def _seed_people_and_mission(db: Repositorios, config: MissionConfig) -> list[tu
     Returns:
         ``(id_user, id_mission_log)`` of each astronaut, in ``CREW`` order.
     """
-    db.usuarios.insertar(full_name=ADMIN[0], email=ADMIN[1], role=Rol.ADMIN,
-                         birth_date=date(1980, 1, 1), sex=Sexo.FEMENINO)
-    doctor_ids = [
-        db.usuarios.insertar(full_name=name, email=email, role=Rol.DOCTOR,
-                             birth_date=date(1978 + i, 3, 10),
-                             sex=Sexo.FEMENINO if i == 0 else Sexo.MASCULINO)
-        for i, (name, email) in enumerate(DOCTORS)
-    ]
+    def add_user(name: str, email: str, role: Rol, birth: date, sex: Sexo) -> int:
+        return db.usuarios.insertar(full_name=name, email=email, role=role, birth_date=birth, sex=sex,
+                                    password_hash=hash_password(DEMO_PASSWORD))
+
+    add_user(*ADMIN, Rol.ADMIN, date(1980, 1, 1), Sexo.FEMENINO)
+    id_doctor = add_user(*DOCTOR, Rol.DOCTOR, date(1978, 3, 10), Sexo.FEMENINO)
     id_mission = db.misiones.insertar(
         name=config.name, start_date=config.start_date,
         end_date=mission_date(config.start_date, config.days),
@@ -86,18 +86,16 @@ def _seed_people_and_mission(db: Repositorios, config: MissionConfig) -> list[tu
     )
 
     crew_ids: list[tuple[int, int]] = []
-    for i, p in enumerate(CREW):
-        id_user = db.usuarios.insertar(full_name=p.full_name, email=p.email, role=Rol.ASTRONAUTA,
-                                       birth_date=p.birth_date, sex=p.sex)
+    for p in CREW:
+        id_user = add_user(p.full_name, p.email, Rol.ASTRONAUTA, p.birth_date, p.sex)
         id_log = db.mission_logs.insertar(
             id_user=id_user, id_mission=id_mission, start_date=config.start_date,
             start_weight_kg=p.weight_kg, start_height_cm=p.height_cm, start_muscle_pct=p.muscle_pct,
             start_fat_pct=p.fat_pct, baseline_hb_g_dl=p.baseline_hb_g_dl,
         )
-        doctor = doctor_ids[i // 2]                      # 2 astronauts per doctor
-        db.asignaciones.insertar(id_doctor=doctor, id_mission_log=id_log)
+        db.asignaciones.insertar(id_doctor=id_doctor, id_mission_log=id_log)
         db.pastillas.insertar(
-            id_user=id_user, assigned_by=doctor, name="Vitamina D3", dose="1000 UI",
+            id_user=id_user, assigned_by=id_doctor, name="Vitamina D3", dose="1000 UI",
             description="Suplemento diario estándar en vuelo.", scheduled_time=time(8, 0),
             start_date=config.start_date,
         )
@@ -129,7 +127,7 @@ def _sync_nasa(db_path: Path, start: date, end: date) -> None:
 
 def generate_mission(
     config: MissionConfig = DEFAULT_MISSION,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
     *,
     reset: bool = True,
     sync_nasa: bool = True,
@@ -148,6 +146,7 @@ def generate_mission(
     Returns:
         Rows inserted per table.
     """
+    db_path = Path(db_path or database_path())
     if config.environment not in DOSE_RATE_MSV_DAY:
         raise ValueError(f"environment must be one of {sorted(DOSE_RATE_MSV_DAY)}")
     if reset:
@@ -193,7 +192,7 @@ def main() -> None:
                         help="Fecha de inicio YYYY-MM-DD (por defecto 2024-05-01).")
     parser.add_argument("--environment", choices=sorted(DOSE_RATE_MSV_DAY), default="iss")
     parser.add_argument("--seed", type=int, default=MissionConfig.seed)
-    parser.add_argument("--db", type=Path, default=DB_PATH)
+    parser.add_argument("--db", type=Path, help="Base destino (por defecto, data/astro.db).")
     parser.add_argument("--no-sync", action="store_true", help="No consulta DONKI ni NOAA.")
     parser.add_argument("--keep", action="store_true", help="No borra la base existente.")
     args = parser.parse_args()

@@ -25,7 +25,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
-from config import DB_PATH
 from core.enums import EscenarioSimulacion, EstadoSimulacion
 from core.escenarios import (
     ANEMIA,
@@ -247,7 +246,7 @@ def launch_simulation(
     days: int | None = None,
     *,
     launched_by: int | None = None,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     config: PipelineConfig | None = None,
     bus: EventBus = default_bus,
     now: datetime | None = None,
@@ -304,7 +303,7 @@ def revert_simulation(
     run_id: int,
     *,
     reverted_by: int | None = None,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     now: datetime | None = None,
 ) -> dict[str, int]:
     """Deletes every simulated row of the astronaut and restores the monitoring mode.
@@ -330,7 +329,7 @@ def revert_simulation(
     return deleted
 
 
-def active_simulation(id_mission_log: int, *, db_path: Path | str = DB_PATH) -> dict[str, Any] | None:
+def active_simulation(id_mission_log: int, *, db_path: Path | str | None = None) -> dict[str, Any] | None:
     """The active simulation of an astronaut, if any (for the doctor's UI)."""
     with sesion(db_path) as db:
         runs = db.simulaciones.listar(id_mission_log=id_mission_log, status=EstadoSimulacion.ACTIVA)

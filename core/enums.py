@@ -40,6 +40,7 @@ class TipoComida(StrEnum):
 class TipoRecordatorio(StrEnum):
     PASTILLA = "pill"
     COMIDA = "meal"
+    AVISO = "notice"
     MUESTRA_GLUCOSA = "glucose_sample"
     MUESTRA_SALIVA = "saliva_sample"
     PESAJE_BIA = "bia_weigh_in"

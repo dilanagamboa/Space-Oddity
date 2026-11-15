@@ -29,15 +29,15 @@ def _sleep_hours(db, id_log: int, day: int) -> float:
 
 def test_counts_follow_sampling_plan(mission_db: Path) -> None:
     with sesion(mission_db) as db:
-        assert len(db.usuarios.listar()) == len(CREW) + 3          # + 2 doctors + admin
+        assert len(db.usuarios.listar()) == len(CREW) + 2          # + 1 doctor + admin
         assert len(db.cardiovascular.listar(id_mission_log=1)) == 14 * 96
         assert len(db.radiacion.listar(id_mission_log=1)) == 14
         assert {r["mission_day"] for r in db.saliva.listar(id_mission_log=1)} == {3, 10}
         assert len(db.composicion.listar(id_mission_log=1)) == 2   # days 1 and 8
         assert len(db.referencias.listar()) >= 10
-        # Each doctor supervises 2 astronauts
-        doctors = [u["id"] for u in db.usuarios.listar(role=1)]
-        assert [len(db.asignaciones.pacientes_de(d)) for d in doctors] == [2, 2]
+        # The single flight surgeon supervises the whole crew
+        (doctor,) = db.usuarios.listar(role=1)
+        assert len(db.asignaciones.pacientes_de(doctor["id"])) == len(CREW)
 
 
 def test_values_stay_in_physiological_ranges(mission_db: Path) -> None:

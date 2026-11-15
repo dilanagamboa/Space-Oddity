@@ -22,7 +22,6 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import ClassVar
 
-from config import DB_PATH
 from core.enums import Rol
 from services.database import sesion
 from services.eventos import AlertEvent, EventBus, default_bus
@@ -143,7 +142,7 @@ def build_message(event: AlertEvent, doctor_emails: list[str]) -> NotificationPa
 def send_alert_notification(
     event: AlertEvent,
     *,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     sender: SenderFn | None = None,
     channel: str = "email",
 ) -> bool:
@@ -169,7 +168,7 @@ def send_alert_notification(
 def subscribe_notifications(
     bus: EventBus = default_bus,
     *,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     sender: SenderFn | None = None,
     channel: str = "email",
 ) -> Callable[[], None]:

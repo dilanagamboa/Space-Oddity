@@ -15,7 +15,6 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
-from config import DB_PATH
 from services.database import sesion
 from services.reportes import process_mission_log
 
@@ -23,7 +22,7 @@ from services.reportes import process_mission_log
 def main() -> None:
     parser = argparse.ArgumentParser(description="Calcula reportes diarios y alertas.")
     parser.add_argument("--log", type=int, help="ID del mission log (por defecto, todos los activos).")
-    parser.add_argument("--db", type=Path, default=DB_PATH)
+    parser.add_argument("--db", type=Path, help="Base a procesar (por defecto, data/astro.db).")
     args = parser.parse_args()
 
     with sesion(args.db) as db:

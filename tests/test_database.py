@@ -39,7 +39,7 @@ def test_crea_todas_las_tablas(db_path: Path) -> None:
         if not f["name"].startswith("sqlite_")
     }
     conn.close()
-    assert len(tablas) == 20
+    assert len(tablas) == 21
     assert {"crew_assignments", "tasks", "simulation_runs", "audit_log"} <= tablas
 
 

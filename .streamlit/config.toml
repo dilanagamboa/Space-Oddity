@@ -1,7 +1,18 @@
+# Figma palette. Layout details that the theme cannot express live in assets/estilo.css.
 [theme]
 base = "light"
-primaryColor = "#FF9362"
+primaryColor = "#FF9466"                 # Orange buttons (Login, Save, Select, New assignment)
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#D9D9D9"
-textColor = "#233746"
-font = "serif"
+secondaryBackgroundColor = "#E6E6E6"     # Grey input boxes
+textColor = "#2C3E57"                    # Navy text
+font = "'Gentium Book Plus':https://fonts.googleapis.com/css2?family=Gentium+Book+Plus:wght@400;700&display=swap"
+baseRadius = "0.4rem"
+showWidgetBorder = false
+
+[theme.sidebar]
+backgroundColor = "#567B8C"              # Steel-blue icon bar
+secondaryBackgroundColor = "#567B8C"
+textColor = "#0E1A23"
+
+[client]
+toolbarMode = "viewer"                   # Hides "Deploy"

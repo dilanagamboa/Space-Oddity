@@ -36,7 +36,6 @@ from datetime import time
 from pathlib import Path
 from typing import Any
 
-from config import DB_PATH
 from core.alertas import AlertDraft, build_alerts, filter_repeated
 from core.evaluacion import (
     DEFAULT_SETTINGS,
@@ -269,7 +268,7 @@ def process_days(
     days: Sequence[int],
     *,
     simulated: bool = False,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     config: PipelineConfig | None = None,
     bus: EventBus = default_bus,
 ) -> list[DayResult]:
@@ -288,7 +287,7 @@ def process_days(
 def process_mission_log(
     id_mission_log: int,
     *,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     config: PipelineConfig | None = None,
     bus: EventBus = default_bus,
 ) -> list[DayResult]:

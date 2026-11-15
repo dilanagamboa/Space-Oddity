@@ -32,7 +32,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
-from config import DB_PATH
+from config import database_path
 from core.enums import EstadoAlerta, EstadoRecordatorio, EstadoTarea, Rol
 
 Fila = dict[str, Any]
@@ -90,7 +90,7 @@ def _desde_sql(fila: sqlite3.Row) -> Fila:
 # ============================================================================
 # Conexión y transacciones
 # ============================================================================
-def conectar(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
+def conectar(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Abre una conexión con llaves foráneas activas y filas tipo diccionario.
 
     Args:
@@ -99,14 +99,14 @@ def conectar(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     Returns:
         Conexión lista para usar.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path or database_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
 @contextmanager
-def sesion(db_path: Path | str = DB_PATH) -> Iterator[Repositorios]:
+def sesion(db_path: Path | str | None = None) -> Iterator[Repositorios]:
     """Unit of Work: abre una transacción y entrega los repositorios.
 
     Hace commit al salir del bloque, rollback si ocurre una excepción y cierra
@@ -341,18 +341,23 @@ class AsignacionRepo(RepositorioBase):
         return bool(self.listar(id_doctor=id_doctor, id_mission_log=id_mission_log, active=1))
 
 
-class PastillaRepo(RepositorioBase):
+class ItemUsuarioRepo(RepositorioBase):
+    """Pastillas, comidas y avisos: asignaciones activas de un usuario con hora y días."""
+
+    def activas_de(self, id_user: int) -> list[Fila]:
+        return self.listar(id_user=id_user, active=1, orden="scheduled_time")
+
+
+class PastillaRepo(ItemUsuarioRepo):
     tabla = "pills"
 
-    def activas_de(self, id_user: int) -> list[Fila]:
-        return self.listar(id_user=id_user, active=1, orden="scheduled_time")
 
-
-class ComidaRepo(RepositorioBase):
+class ComidaRepo(ItemUsuarioRepo):
     tabla = "meals"
 
-    def activas_de(self, id_user: int) -> list[Fila]:
-        return self.listar(id_user=id_user, active=1, orden="scheduled_time")
+
+class AvisoRepo(ItemUsuarioRepo):
+    tabla = "notices"
 
 
 class TareaRepo(RepositorioBase):
@@ -499,6 +504,7 @@ class Repositorios:
         self.asignaciones = AsignacionRepo(conn)
         self.pastillas = PastillaRepo(conn)
         self.comidas = ComidaRepo(conn)
+        self.avisos = AvisoRepo(conn)
         self.tareas = TareaRepo(conn)
         self.recordatorios = RecordatorioRepo(conn)
         self.cardiovascular = CardiovascularRepo(conn)

@@ -45,3 +45,8 @@ def _leer_secreto(clave: str) -> Any | None:
 def obtener_config() -> Config:
     """Construye la configuración una sola vez por proceso."""
     return Config(nasa_api_key=str(_leer_secreto("NASA_API_KEY") or "DEMO_KEY"))
+
+
+def database_path() -> Path:
+    """Database in use: ``SPACE_ODDITY_DB`` if set (tests, deploys), otherwise ``data/astro.db``."""
+    return Path(os.getenv("SPACE_ODDITY_DB") or DB_PATH)

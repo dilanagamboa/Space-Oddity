@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS pills (
     description TEXT,
     dose TEXT,                                            -- p. ej. '1000 UI'
     scheduled_time TEXT NOT NULL,                         -- HH:MM
-    frequency_days INTEGER NOT NULL DEFAULT 1 CHECK (frequency_days >= 1),
+    weekdays INTEGER NOT NULL DEFAULT 127 CHECK (weekdays BETWEEN 1 AND 127), -- Bits L=1 ... D=64
     start_date TEXT NOT NULL,                             -- ISO YYYY-MM-DD
     end_date TEXT,
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
@@ -90,9 +90,23 @@ CREATE TABLE IF NOT EXISTS meals (
     target_calories_kcal REAL,
     target_protein_g REAL,
     scheduled_time TEXT NOT NULL,                         -- HH:MM
-    frequency_days INTEGER NOT NULL DEFAULT 1,
+    weekdays INTEGER NOT NULL DEFAULT 127 CHECK (weekdays BETWEEN 1 AND 127), -- Bits L=1 ... D=64
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     FOREIGN KEY (id_user) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Avisos personalizados que el doctor asigna a un astronauta (se repiten por días de la semana)
+CREATE TABLE IF NOT EXISTS notices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_user INTEGER NOT NULL,
+    assigned_by INTEGER,
+    name TEXT NOT NULL,                                   -- Título del aviso
+    message TEXT,
+    scheduled_time TEXT NOT NULL,                         -- HH:MM
+    weekdays INTEGER NOT NULL DEFAULT 127 CHECK (weekdays BETWEEN 1 AND 127), -- Bits L=1 ... D=64
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    FOREIGN KEY (id_user) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 -- Tareas que un doctor asigna a un astronauta
@@ -118,9 +132,10 @@ CREATE TABLE IF NOT EXISTS reminders_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     id_mission_log INTEGER NOT NULL,
     reminder_type TEXT NOT NULL
-        CHECK (reminder_type IN ('pill', 'meal', 'glucose_sample', 'saliva_sample', 'bia_weigh_in', 'task')),
+        CHECK (reminder_type IN ('pill', 'meal', 'notice', 'glucose_sample', 'saliva_sample', 'bia_weigh_in', 'task')),
     id_pill INTEGER,
     id_meal INTEGER,
+    id_notice INTEGER,
     id_task INTEGER,
     title TEXT NOT NULL,
     instructions TEXT,
@@ -136,6 +151,7 @@ CREATE TABLE IF NOT EXISTS reminders_log (
     FOREIGN KEY (id_mission_log) REFERENCES mission_logs(id) ON DELETE CASCADE,
     FOREIGN KEY (id_pill) REFERENCES pills(id) ON DELETE SET NULL,
     FOREIGN KEY (id_meal) REFERENCES meals(id) ON DELETE SET NULL,
+    FOREIGN KEY (id_notice) REFERENCES notices(id) ON DELETE SET NULL,
     FOREIGN KEY (id_task) REFERENCES tasks(id) ON DELETE SET NULL
 );
 
