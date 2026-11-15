@@ -9,17 +9,15 @@ Implements risk detection logic for the following health domains:
 Architecture rule: Importing streamlit or sqlite3 inside core/ is strictly forbidden.
 """
 
-from dataclasses import dataclass, asdict
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 Severity = Literal["normal", "yellow", "red"]
 AlertCategory = Literal["C", "F", "G", "S"]
-SamplingMode = Literal[
-    "standard",
-    "alert_infection",
-    "alert_atrophy",
-    "alert_circadian",
-]
+SamplingMode = Literal["standard", "alert_infection", "alert_atrophy", "alert_circadian"]
 
 
 @dataclass(frozen=True)
@@ -46,164 +44,54 @@ class EvaluationResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Converts the evaluation result into a JSON-serializable dictionary."""
-        return {
-            "triage_status": self.triage_status,
-            "recommended_sampling_mode": self.recommended_sampling_mode,
-            "category_severities": self.category_severities,
-            "triggered_rules": [asdict(rule) for rule in self.triggered_rules],
-        }
+        return asdict(self)
 
 
 # =====================================================================
 # 1. CLINICAL CONSTANTS AND THRESHOLDS (Documented Sources)
 # =====================================================================
 
-THRESHOLDS: dict[str, Any] = {
+THRESHOLDS: dict[str, dict[str, Any]] = {
     # --- PROBLEM C: Muscle, malnutrition, and visceral fat ---
-    "delta_mass_pct": {
-        "yellow_min": 5.0,   # 5-10% in <= 6 months (GLIM Stage 1) [1]
-        "red_min": 10.0,     # > 10% in <= 6 months (GLIM Stage 2) [1]
-        "source": "GLIM 2019 [1]",
-    },
-    "bmi": {
-        "yellow_max": 20.0,  # < 20 kg/m2 (< 70 years) [1]
-        "red_max": 18.5,     # < 18.5 kg/m2 [1]
-        "source": "GLIM 2019 [1]",
-    },
-    "smi_male": {  # sex == 1 (Male)
-        "yellow_max": 10.75,  # 8.51 - 10.75 kg/m2 [2]
-        "red_max": 8.50,      # <= 8.50 kg/m2 [2]
-        "source": "Janssen et al. 2004 [2]",
-    },
-    "smi_female": {  # sex == 0 (Female)
-        "yellow_max": 6.75,   # 5.76 - 6.75 kg/m2 [2]
-        "red_max": 5.75,      # <= 5.75 kg/m2 [2]
-        "source": "Janssen et al. 2004 [2]",
-    },
-    "asmi_bia": {  # Appendicular skeletal muscle index (if provided by BIA chair)
-        "red_male_max": 7.0,    # < 7.0 kg/m2 [3]
-        "red_female_max": 5.7,  # < 5.7 kg/m2 [3]
-        "source": "EWGSOP2 2019 [3]",
-    },
-    "visceral_fat_area_cm2": {
-        "yellow_min": 100.0,  # >= 100 cm2 (Red if combined with low SMI) [4]
-        "source": "JSSO 2002 / Team [4]",
-    },
-    "visceral_fat_tanita": {
-        "yellow_min": 13.0,   # 13 - 19 [5]
-        "red_min": 20.0,      # >= 20 [5]
-        "source": "Tanita / Team [5]",
-    },
-
+    "delta_mass_pct": {"yellow": 5.0, "red": 10.0, "source": "GLIM 2019 [1]"},
+    "bmi": {"yellow": 20.0, "red": 18.5, "source": "GLIM 2019 [1]"},
+    "smi_male": {"yellow": 10.75, "red": 8.50, "source": "Janssen et al. 2004 [2]"},
+    "smi_female": {"yellow": 6.75, "red": 5.75, "source": "Janssen et al. 2004 [2]"},
+    "asmi_bia": {"male": 7.0, "female": 5.7, "source": "EWGSOP2 2019 [3]"},
+    "visceral_fat_area_cm2": {"yellow": 100.0, "source": "JSSO 2002 / Team [4]"},
+    "visceral_fat_tanita": {"yellow": 13.0, "red": 20.0, "source": "Tanita / Team [5]"},
     # --- PROBLEM F: Circadian rhythm, sleep, and HPA axis ---
-    "sleep_hours": {
-        "normal_min": 7.0,
-        "yellow_max": 6.0,    # < 6 h for 3 consecutive nights [9]
-        "yellow_nights": 3,
-        "red_max": 5.0,       # < 5 h for 2 consecutive nights [9]
-        "red_nights": 2,
-        "source": "AASM/SRS Watson 2015 / Team [9]",
-    },
-    "car_delta_nmol_l": {
-        "yellow_max": 2.5,    # Increase < +2.5 nmol/L (blunted) [10]
-        "red_weeks": 2,       # Blunted for 2 consecutive weeks [10]
-        "source": "Wüst 2000 / Team [10]",
-    },
-    "cortisol_morning_nmol_l": {
-        "min": 13.0,          # 07-08 h: 13-24 nmol/L [12]
-        "max": 24.0,
-        "source": "Medicina 2021 [12]",
-    },
-    "cortisol_afternoon_nmol_l": {
-        "min": 3.0,           # 16-17 h: 3-8 nmol/L [12]
-        "max": 8.0,
-        "source": "Medicina 2021 [12]",
-    },
-    "cortisol_night_nmol_l": {
-        "yellow_min": 4.0,    # 23-24 h: > 4 nmol/L (Red if C/DHEA ratio is rising) [12]
-        "source": "Medicina 2021 [12]",
-    },
-    "aucg_cortisol_z": {
-        "yellow_min": 1.5,    # z > +1.5 [11]
-        "red_min": 3.0,       # z > +3.0 [11]
-        "source": "Pruessner 2003 [11]",
-    },
-    "cortisol_dhea_ratio_z": {
-        "yellow_min": 1.5,    # z > +1.5 vs. baseline
-        "red_min": 3.0,       # z > +3.0 vs. baseline
-        "source": "Mehta 2017 / Team",
-    },
-    "saa_z": {
-        "yellow_min": 2.0,    # z > +2.0 vs. baseline [13][14]
-        "source": "Nater & Rohleder 2009 [14]",
-    },
-    "hrv_rmssd_z_circadian": {
-        "yellow_max": -1.5,   # z < -1.5 [15][16]
-        "red_max": -3.0,      # z < -3.0 [15][16]
-        "source": "Task Force 1996 / Nunan 2010 [15][16]",
-    },
-    "hrv_sdnn_z": {
-        "yellow_max": -1.5,   # z < -1.5 [16]
-        "source": "Nunan 2010 [16]",
-    },
-
+    "sleep_hours": {"yellow": 6.0, "red": 5.0, "source": "AASM/SRS Watson 2015 / Team [9]"},
+    "car_delta_nmol_l": {"yellow": 2.5, "source": "Wüst 2000 / Team [10]"},
+    "cortisol_morning_nmol_l": {"min": 13.0, "max": 24.0, "source": "Medicina 2021 [12]"},
+    "cortisol_afternoon_nmol_l": {"min": 3.0, "max": 8.0, "source": "Medicina 2021 [12]"},
+    "cortisol_night_nmol_l": {"yellow": 4.0, "source": "Medicina 2021 [12]"},
+    "aucg_cortisol_z": {"yellow": 1.5, "red": 3.0, "source": "Pruessner 2003 [11]"},
+    "cortisol_dhea_ratio_z": {"yellow": 1.5, "red": 3.0, "source": "Mehta 2017 / Team"},
+    "saa_z": {"yellow": 2.0, "source": "Nater & Rohleder 2009 [14]"},
+    "hrv_rmssd_z_circadian": {"yellow": -1.5, "red": -3.0, "source": "Task Force 1996 / Nunan 2010 [15][16]"},
+    "hrv_sdnn_z": {"yellow": -1.5, "source": "Nunan 2010 [16]"},
     # --- PROBLEM G: Early infection ---
-    "skin_temp_delta_c": {
-        "threshold": 0.5,     # >= +0.5 °C vs. 28-day baseline [19]
-        "luteal_offset": 0.4, # Physiological luteal phase compensation (+0.3 to +0.5 °C)
-        "yellow_nights": 2,
-        "red_nights": 3,
-        "source": "Oura / Team [19]",
-    },
-    "core_temp_c": {
-        "red_min": 36.0,      # < 36.0 °C or > 38.0 °C [17]
-        "red_max": 38.0,
-        "source": "ACCP/SCCM Bone 1992 [17]",
-    },
-    "resting_hr": {
-        "yellow_z_min": 1.5,  # z > +1.5 [18]
-        "red_bpm_min": 90.0,  # > 90 bpm [17]
-        "source": "Bone 1992 / Mishra 2020 [17][18]",
-    },
-    "hrv_z_infection": {
-        "yellow_max": -1.5,   # Z_HRV < -1.5 [15]
-        "red_max": -2.5,      # Z_HRV < -2.5 [15]
-        "source": "Task Force 1996 / Team [15]",
-    },
-    "respiratory_rate_rpm": {
-        "normal_min": 12.0,
-        "red_min": 20.0,      # > 20 rpm (Yellow if rising vs. baseline) [17]
-        "source": "ACCP/SCCM Bone 1992 [17]",
-    },
-
+    "skin_temp_delta_c": {"threshold": 0.5, "luteal_offset": 0.4, "source": "Oura / Team [19]"},
+    "core_temp_c": {"min": 36.0, "max": 38.0, "source": "ACCP/SCCM Bone 1992 [17]"},
+    "resting_hr": {"yellow_z": 1.5, "red_bpm": 90.0, "source": "Bone 1992 / Mishra 2020 [17][18]"},
+    "hrv_z_infection": {"yellow": -1.5, "red": -2.5, "source": "Task Force 1996 / Team [15]"},
+    "respiratory_rate_rpm": {"red": 20.0, "source": "ACCP/SCCM Bone 1992 [17]"},
     # --- SAFETY (S1 - S4: Dashboard / Immediate Action) ---
-    "glucose_mg_dl": {
-        "red_low": 54.0,      # < 54 mg/dL (Level 2 hypoglycemia) [21]
-        "yellow_low": 70.0,   # < 70 mg/dL (Level 1 hypoglycemia) [21]
-        "yellow_high": 180.0, # > 180 mg/dL [22]
-        "red_high": 250.0,    # > 250 mg/dL [22]
-        "source": "ADA / Battelino 2019 [21][22]",
-    },
-    "blood_pressure_mmhg": {
-        "yellow_sys": 140.0,  # >= 140/90 mmHg (Stage 2) [23]
-        "yellow_dia": 90.0,
-        "red_sys": 180.0,     # >= 180/120 mmHg (Hypertensive crisis) [23]
-        "red_dia": 120.0,
-        "source": "ACC/AHA 2017 [23]",
-    },
-    "spo2_pct": {
-        "yellow_max": 95.0,   # < 95% sustained
-        "red_max": 90.0,      # < 90% or simultaneous drop in 2+ crew members
-        "source": "Standard clinical criteria",
-    },
-    "radiation": {
-        "limit_msv": 300.0,       # 50% of NASA career limit (600 mSv) [26]
-        "yellow_ratio": 0.50,     # Cumulative >= 50% of mission limit
-        "proton_mev_min": 10.0,   # Solar particle event: protons >= 10 MeV at >= 10 pfu [27]
-        "proton_pfu_min": 10.0,
-        "source": "NASA-STD-3001 / NOAA SWPC [26][27]",
-    },
+    "glucose_mg_dl": {"red_low": 54.0, "yellow_low": 70.0, "yellow_high": 180.0, "red_high": 250.0,
+                      "source": "ADA / Battelino 2019 [21][22]"},
+    "blood_pressure_mmhg": {"yellow_sys": 140.0, "yellow_dia": 90.0, "red_sys": 180.0, "red_dia": 120.0,
+                            "source": "ACC/AHA 2017 [23]"},
+    "spo2_pct": {"yellow": 95.0, "red": 90.0, "source": "Standard clinical criteria"},
+    "radiation": {"yellow_ratio": 0.50, "proton_pfu": 10.0, "source": "NASA-STD-3001 / NOAA SWPC [26][27]"},
 }
+
+
+def _rule(metric: str, cat: AlertCategory, sev: Severity, val: float | str,
+          ref: str, key: str, notif: str, digits: int = 2) -> TriggeredRule:
+    """Builds a TriggeredRule rounding numeric values and resolving the source string."""
+    v = round(val, digits) if isinstance(val, float) else val
+    return TriggeredRule(metric, cat, sev, v, ref, THRESHOLDS[key]["source"], notif)
 
 
 # =====================================================================
@@ -214,7 +102,7 @@ def evaluate_problem_c(
     delta_mass_pct: float | None = None,
     bmi: float | None = None,
     smi_total_kg_m2: float | None = None,
-    sex: int = 1,  # 0 = Female, 1 = Male (matches users table)
+    sex: int = 1,  # 0 = Female, 1 = Male
     asmi_kg_m2: float | None = None,
     visceral_fat_area_cm2: float | None = None,
     visceral_fat_level: float | None = None,
@@ -224,108 +112,56 @@ def evaluate_problem_c(
 
     # 1. Body mass loss percentage (GLIM criteria)
     if delta_mass_pct is not None:
-        if delta_mass_pct > THRESHOLDS["delta_mass_pct"]["red_min"]:
-            rules.append(TriggeredRule(
-                metric="delta_mass_pct", category="C", severity="red",
-                current_value=round(delta_mass_pct, 2),
-                reference_threshold="> 10% in <= 6 months (GLIM Stage 2)",
-                source=THRESHOLDS["delta_mass_pct"]["source"], notification_id="C1"
-            ))
-        elif delta_mass_pct >= THRESHOLDS["delta_mass_pct"]["yellow_min"]:
-            rules.append(TriggeredRule(
-                metric="delta_mass_pct", category="C", severity="yellow",
-                current_value=round(delta_mass_pct, 2),
-                reference_threshold="5-10% in <= 6 months (GLIM Stage 1)",
-                source=THRESHOLDS["delta_mass_pct"]["source"], notification_id="C1"
-            ))
+        if delta_mass_pct > THRESHOLDS["delta_mass_pct"]["red"]:
+            rules.append(_rule("delta_mass_pct", "C", "red", delta_mass_pct, "> 10% in <= 6 months (GLIM Stage 2)", "delta_mass_pct", "C1"))
+        elif delta_mass_pct >= THRESHOLDS["delta_mass_pct"]["yellow"]:
+            rules.append(_rule("delta_mass_pct", "C", "yellow", delta_mass_pct, "5-10% in <= 6 months (GLIM Stage 1)", "delta_mass_pct", "C1"))
 
     # 2. Body Mass Index (BMI)
     if bmi is not None:
-        if bmi < THRESHOLDS["bmi"]["red_max"]:
-            rules.append(TriggeredRule(
-                metric="bmi", category="C", severity="red",
-                current_value=round(bmi, 2), reference_threshold="< 18.5 kg/m²",
-                source=THRESHOLDS["bmi"]["source"], notification_id="C1"
-            ))
-        elif bmi < THRESHOLDS["bmi"]["yellow_max"]:
-            rules.append(TriggeredRule(
-                metric="bmi", category="C", severity="yellow",
-                current_value=round(bmi, 2), reference_threshold="< 20.0 kg/m²",
-                source=THRESHOLDS["bmi"]["source"], notification_id="C1"
-            ))
+        if bmi < THRESHOLDS["bmi"]["red"]:
+            rules.append(_rule("bmi", "C", "red", bmi, "< 18.5 kg/m²", "bmi", "C1"))
+        elif bmi < THRESHOLDS["bmi"]["yellow"]:
+            rules.append(_rule("bmi", "C", "yellow", bmi, "< 20.0 kg/m²", "bmi", "C1"))
 
     # 3. Skeletal Muscle Index (SMI) by sex
     is_low_smi = False
     if smi_total_kg_m2 is not None:
-        smi_cfg = THRESHOLDS["smi_male"] if sex == 1 else THRESHOLDS["smi_female"]
-        if smi_total_kg_m2 <= smi_cfg["red_max"]:
+        smi_key = "smi_male" if sex == 1 else "smi_female"
+        cfg = THRESHOLDS[smi_key]
+        if smi_total_kg_m2 <= cfg["red"]:
             is_low_smi = True
-            rules.append(TriggeredRule(
-                metric="smi_total_kg_m2", category="C", severity="red",
-                current_value=round(smi_total_kg_m2, 2),
-                reference_threshold=f"<= {smi_cfg['red_max']} kg/m²",
-                source=smi_cfg["source"], notification_id="C2"
-            ))
-        elif smi_total_kg_m2 <= smi_cfg["yellow_max"]:
+            rules.append(_rule("smi_total_kg_m2", "C", "red", smi_total_kg_m2, f"<= {cfg['red']} kg/m²", smi_key, "C2"))
+        elif smi_total_kg_m2 <= cfg["yellow"]:
             is_low_smi = True
-            rules.append(TriggeredRule(
-                metric="smi_total_kg_m2", category="C", severity="yellow",
-                current_value=round(smi_total_kg_m2, 2),
-                reference_threshold=f"<= {smi_cfg['yellow_max']} kg/m²",
-                source=smi_cfg["source"], notification_id="C2"
-            ))
+            rules.append(_rule("smi_total_kg_m2", "C", "yellow", smi_total_kg_m2, f"<= {cfg['yellow']} kg/m²", smi_key, "C2"))
 
     # 4. Appendicular Skeletal Muscle Index (ASMI) optional
     if asmi_kg_m2 is not None:
-        asmi_limit = (
-            THRESHOLDS["asmi_bia"]["red_male_max"]
-            if sex == 1
-            else THRESHOLDS["asmi_bia"]["red_female_max"]
-        )
-        if asmi_kg_m2 < asmi_limit:
+        limit = THRESHOLDS["asmi_bia"]["male" if sex == 1 else "female"]
+        if asmi_kg_m2 < limit:
             is_low_smi = True
-            rules.append(TriggeredRule(
-                metric="asmi_kg_m2", category="C", severity="red",
-                current_value=round(asmi_kg_m2, 2),
-                reference_threshold=f"< {asmi_limit} kg/m² (BIA)",
-                source=THRESHOLDS["asmi_bia"]["source"], notification_id="C2"
-            ))
+            rules.append(_rule("asmi_kg_m2", "C", "red", asmi_kg_m2, f"< {limit} kg/m² (BIA)", "asmi_bia", "C2"))
 
     # 5. Visceral fat area (cm2 + sarcopenic obesity combination)
-    if visceral_fat_area_cm2 is not None and visceral_fat_area_cm2 >= 100.0:
-        area_severity: Severity = "red" if is_low_smi else "yellow"
-        area_ref = ">= 100 cm² + low SMI (Sarcopenic obesity)" if is_low_smi else ">= 100 cm²"
-        rules.append(TriggeredRule(
-            metric="visceral_fat_area_cm2", category="C", severity=area_severity,
-            current_value=round(visceral_fat_area_cm2, 1),
-            reference_threshold=area_ref,
-            source=THRESHOLDS["visceral_fat_area_cm2"]["source"], notification_id="C3"
-        ))
+    if visceral_fat_area_cm2 is not None and visceral_fat_area_cm2 >= THRESHOLDS["visceral_fat_area_cm2"]["yellow"]:
+        sev: Severity = "red" if is_low_smi else "yellow"
+        ref = ">= 100 cm² + low SMI (Sarcopenic obesity)" if is_low_smi else ">= 100 cm²"
+        rules.append(_rule("visceral_fat_area_cm2", "C", sev, visceral_fat_area_cm2, ref, "visceral_fat_area_cm2", "C3", 1))
 
     # 6. Visceral fat level (Tanita scale 1-59)
     if visceral_fat_level is not None:
-        if visceral_fat_level >= THRESHOLDS["visceral_fat_tanita"]["red_min"] or (
-            visceral_fat_level >= THRESHOLDS["visceral_fat_tanita"]["yellow_min"] and is_low_smi
-        ):
-            rules.append(TriggeredRule(
-                metric="visceral_fat_level", category="C", severity="red",
-                current_value=visceral_fat_level,
-                reference_threshold=">= 20 (or >= 13 with low SMI)",
-                source=THRESHOLDS["visceral_fat_tanita"]["source"], notification_id="C3"
-            ))
-        elif visceral_fat_level >= THRESHOLDS["visceral_fat_tanita"]["yellow_min"]:
-            rules.append(TriggeredRule(
-                metric="visceral_fat_level", category="C", severity="yellow",
-                current_value=visceral_fat_level,
-                reference_threshold="13 - 19 (Tanita scale)",
-                source=THRESHOLDS["visceral_fat_tanita"]["source"], notification_id="C3"
-            ))
+        t_cfg = THRESHOLDS["visceral_fat_tanita"]
+        if visceral_fat_level >= t_cfg["red"] or (visceral_fat_level >= t_cfg["yellow"] and is_low_smi):
+            rules.append(_rule("visceral_fat_level", "C", "red", visceral_fat_level, ">= 20 (or >= 13 with low SMI)", "visceral_fat_tanita", "C3"))
+        elif visceral_fat_level >= t_cfg["yellow"]:
+            rules.append(_rule("visceral_fat_level", "C", "yellow", visceral_fat_level, "13 - 19 (Tanita scale)", "visceral_fat_tanita", "C3"))
 
     return rules
 
 
 def evaluate_problem_f(
-    sleep_hours_history: list[float] | None = None,
+    sleep_hours_history: Sequence[float] | None = None,
     car_absolute_nmol_l: float | None = None,
     car_blunted_consecutive_weeks: int = 0,
     cortisol_morning_nmol_l: float | None = None,
@@ -344,143 +180,64 @@ def evaluate_problem_f(
 
     # 1. Consecutive nights of sleep deprivation
     if sleep_hours_history:
-        last_2 = sleep_hours_history[-2:] if len(sleep_hours_history) >= 2 else []
-        last_3 = sleep_hours_history[-3:] if len(sleep_hours_history) >= 3 else []
-        if len(last_2) == 2 and all(h < 5.0 for h in last_2):
-            rules.append(TriggeredRule(
-                metric="sleep_total_min", category="F", severity="red",
-                current_value=round(sleep_hours_history[-1], 2),
-                reference_threshold="< 5 h for 2 consecutive nights",
-                source=THRESHOLDS["sleep_hours"]["source"], notification_id="F1"
-            ))
-        elif len(last_3) == 3 and all(h < 6.0 for h in last_3):
-            rules.append(TriggeredRule(
-                metric="sleep_total_min", category="F", severity="yellow",
-                current_value=round(sleep_hours_history[-1], 2),
-                reference_threshold="< 6 h for 3 consecutive nights",
-                source=THRESHOLDS["sleep_hours"]["source"], notification_id="F1"
-            ))
+        if len(sleep_hours_history) >= 2 and all(h < 5.0 for h in sleep_hours_history[-2:]):
+            rules.append(_rule("sleep_total_min", "F", "red", sleep_hours_history[-1], "< 5 h for 2 consecutive nights", "sleep_hours", "F1"))
+        elif len(sleep_hours_history) >= 3 and all(h < 6.0 for h in sleep_hours_history[-3:]):
+            rules.append(_rule("sleep_total_min", "F", "yellow", sleep_hours_history[-1], "< 6 h for 3 consecutive nights", "sleep_hours", "F1"))
 
     # 2. Cortisol Awakening Response (CAR)
-    if car_absolute_nmol_l is not None:
-        if car_blunted_consecutive_weeks >= 2 and car_absolute_nmol_l < 2.5:
-            rules.append(TriggeredRule(
-                metric="car_absolute_nmol_l", category="F", severity="red",
-                current_value=round(car_absolute_nmol_l, 2),
-                reference_threshold="Blunted CAR (< +2.5 nmol/L) for 2 consecutive weeks",
-                source=THRESHOLDS["car_delta_nmol_l"]["source"], notification_id="F1"
-            ))
-        elif car_absolute_nmol_l < 2.5:
-            rules.append(TriggeredRule(
-                metric="car_absolute_nmol_l", category="F", severity="yellow",
-                current_value=round(car_absolute_nmol_l, 2),
-                reference_threshold="Increase < +2.5 nmol/L at +30 min",
-                source=THRESHOLDS["car_delta_nmol_l"]["source"], notification_id="F1"
-            ))
+    if car_absolute_nmol_l is not None and car_absolute_nmol_l < THRESHOLDS["car_delta_nmol_l"]["yellow"]:
+        sev: Severity = "red" if car_blunted_consecutive_weeks >= 2 else "yellow"
+        ref = "Blunted CAR (< +2.5 nmol/L) for 2 consecutive weeks" if sev == "red" else "Increase < +2.5 nmol/L at +30 min"
+        rules.append(_rule("car_absolute_nmol_l", "F", sev, car_absolute_nmol_l, ref, "car_delta_nmol_l", "F1"))
 
     # 3. Salivary cortisol by time slot
     if cortisol_morning_nmol_l is not None and not (13.0 <= cortisol_morning_nmol_l <= 24.0):
-        rules.append(TriggeredRule(
-            metric="cortisol_07_08h", category="F", severity="yellow",
-            current_value=round(cortisol_morning_nmol_l, 2),
-            reference_threshold="Outside 13-24 nmol/L range",
-            source=THRESHOLDS["cortisol_morning_nmol_l"]["source"], notification_id="F1"
-        ))
-
+        rules.append(_rule("cortisol_07_08h", "F", "yellow", cortisol_morning_nmol_l, "Outside 13-24 nmol/L range", "cortisol_morning_nmol_l", "F1"))
     if cortisol_afternoon_nmol_l is not None and not (3.0 <= cortisol_afternoon_nmol_l <= 8.0):
-        rules.append(TriggeredRule(
-            metric="cortisol_16_17h", category="F", severity="yellow",
-            current_value=round(cortisol_afternoon_nmol_l, 2),
-            reference_threshold="Outside 3-8 nmol/L range",
-            source=THRESHOLDS["cortisol_afternoon_nmol_l"]["source"], notification_id="F1"
-        ))
-
+        rules.append(_rule("cortisol_16_17h", "F", "yellow", cortisol_afternoon_nmol_l, "Outside 3-8 nmol/L range", "cortisol_afternoon_nmol_l", "F1"))
     if cortisol_night_nmol_l is not None and cortisol_night_nmol_l > 4.0:
-        is_c_dhea_rising = cortisol_dhea_ratio_rising or (
-            cortisol_dhea_ratio_z is not None and cortisol_dhea_ratio_z > 1.5
-        )
-        night_severity: Severity = "red" if is_c_dhea_rising else "yellow"
-        night_ref = "> 4 nmol/L + rising C/DHEA ratio" if is_c_dhea_rising else "> 4 nmol/L (23-24 h)"
-        rules.append(TriggeredRule(
-            metric="cortisol_23_24h", category="F", severity=night_severity,
-            current_value=round(cortisol_night_nmol_l, 2),
-            reference_threshold=night_ref,
-            source=THRESHOLDS["cortisol_night_nmol_l"]["source"], notification_id="F1"
-        ))
+        rising = cortisol_dhea_ratio_rising or (cortisol_dhea_ratio_z is not None and cortisol_dhea_ratio_z > 1.5)
+        sev = "red" if rising else "yellow"
+        ref = "> 4 nmol/L + rising C/DHEA ratio" if rising else "> 4 nmol/L (23-24 h)"
+        rules.append(_rule("cortisol_23_24h", "F", sev, cortisol_night_nmol_l, ref, "cortisol_night_nmol_l", "F1"))
 
     # 4. Total daily cortisol output (AUCg Z-score)
     if aucg_cortisol_z is not None:
         if aucg_cortisol_z > 3.0:
-            rules.append(TriggeredRule(
-                metric="aucg_cortisol", category="F", severity="red",
-                current_value=round(aucg_cortisol_z, 2), reference_threshold="z > +3.0",
-                source=THRESHOLDS["aucg_cortisol_z"]["source"], notification_id="F1"
-            ))
+            rules.append(_rule("aucg_cortisol", "F", "red", aucg_cortisol_z, "z > +3.0", "aucg_cortisol_z", "F1"))
         elif aucg_cortisol_z > 1.5:
-            rules.append(TriggeredRule(
-                metric="aucg_cortisol", category="F", severity="yellow",
-                current_value=round(aucg_cortisol_z, 2), reference_threshold="z > +1.5",
-                source=THRESHOLDS["aucg_cortisol_z"]["source"], notification_id="F1"
-            ))
+            rules.append(_rule("aucg_cortisol", "F", "yellow", aucg_cortisol_z, "z > +1.5", "aucg_cortisol_z", "F1"))
 
     # 5. Diurnal cortisol slope
     if cortisol_diurnal_slope_flattened:
-        rules.append(TriggeredRule(
-            metric="cortisol_diurnal_slope", category="F", severity="yellow",
-            current_value="Flattened", reference_threshold="Flattened slope vs. baseline",
-            source="Medicina 2021 / Team [12]", notification_id="F1"
-        ))
+        rules.append(_rule("cortisol_diurnal_slope", "F", "yellow", "Flattened", "Flattened slope vs. baseline", "cortisol_night_nmol_l", "F1"))
 
     # 6. Cortisol/DHEA molar ratio (Z-score)
     if cortisol_dhea_ratio_z is not None:
         if cortisol_dhea_ratio_z > 3.0:
-            rules.append(TriggeredRule(
-                metric="cortisol_dhea_molar_ratio", category="F", severity="red",
-                current_value=round(cortisol_dhea_ratio_z, 2), reference_threshold="z > +3.0 vs. baseline",
-                source=THRESHOLDS["cortisol_dhea_ratio_z"]["source"], notification_id="F1"
-            ))
+            rules.append(_rule("cortisol_dhea_molar_ratio", "F", "red", cortisol_dhea_ratio_z, "z > +3.0 vs. baseline", "cortisol_dhea_ratio_z", "F1"))
         elif cortisol_dhea_ratio_z > 1.5:
-            rules.append(TriggeredRule(
-                metric="cortisol_dhea_molar_ratio", category="F", severity="yellow",
-                current_value=round(cortisol_dhea_ratio_z, 2), reference_threshold="z > +1.5 vs. baseline",
-                source=THRESHOLDS["cortisol_dhea_ratio_z"]["source"], notification_id="F1"
-            ))
+            rules.append(_rule("cortisol_dhea_molar_ratio", "F", "yellow", cortisol_dhea_ratio_z, "z > +1.5 vs. baseline", "cortisol_dhea_ratio_z", "F1"))
 
     # 7. Salivary alpha-amylase (sAA Z-score)
     if saa_z is not None and saa_z > 2.0:
-        rules.append(TriggeredRule(
-            metric="salivary_alpha_amylase_u_ml", category="F", severity="yellow",
-            current_value=round(saa_z, 2), reference_threshold="z > +2.0 vs. baseline",
-            source=THRESHOLDS["saa_z"]["source"], notification_id="F1"
-        ))
+        rules.append(_rule("salivary_alpha_amylase_u_ml", "F", "yellow", saa_z, "z > +2.0 vs. baseline", "saa_z", "F1"))
 
     # 8. Resting HRV RMSSD and SDNN (Autonomic/Circadian axis)
     if hrv_rmssd_z is not None:
         if hrv_rmssd_z < -3.0:
-            rules.append(TriggeredRule(
-                metric="hrv_rmssd_daily_ms", category="F", severity="red",
-                current_value=round(hrv_rmssd_z, 2), reference_threshold="z < -3.0",
-                source=THRESHOLDS["hrv_rmssd_z_circadian"]["source"], notification_id="F1"
-            ))
+            rules.append(_rule("hrv_rmssd_daily_ms", "F", "red", hrv_rmssd_z, "z < -3.0", "hrv_rmssd_z_circadian", "F1"))
         elif hrv_rmssd_z < -1.5:
-            rules.append(TriggeredRule(
-                metric="hrv_rmssd_daily_ms", category="F", severity="yellow",
-                current_value=round(hrv_rmssd_z, 2), reference_threshold="z < -1.5",
-                source=THRESHOLDS["hrv_rmssd_z_circadian"]["source"], notification_id="F1"
-            ))
-
+            rules.append(_rule("hrv_rmssd_daily_ms", "F", "yellow", hrv_rmssd_z, "z < -1.5", "hrv_rmssd_z_circadian", "F1"))
     if hrv_sdnn_z is not None and hrv_sdnn_z < -1.5:
-        rules.append(TriggeredRule(
-            metric="hrv_sdnn_daily_ms", category="F", severity="yellow",
-            current_value=round(hrv_sdnn_z, 2), reference_threshold="z < -1.5",
-            source=THRESHOLDS["hrv_sdnn_z"]["source"], notification_id="F1"
-        ))
+        rules.append(_rule("hrv_sdnn_daily_ms", "F", "yellow", hrv_sdnn_z, "z < -1.5", "hrv_sdnn_z", "F1"))
 
     return rules
 
 
 def evaluate_problem_g(
-    skin_temp_deltas_history: list[float] | None = None,
+    skin_temp_deltas_history: Sequence[float] | None = None,
     core_temp_c: float | None = None,
     resting_hr_bpm: float | None = None,
     resting_hr_z: float | None = None,
@@ -497,92 +254,43 @@ def evaluate_problem_g(
     Alert G triggers ONLY if temperature abnormality (nocturnal skin temp or core temp)
     coincides with at least one accompanying autonomic/vital sign (HR, HRV, or RR).
     """
-    temp_candidates: list[TriggeredRule] = []
-    vital_sign_candidates: list[TriggeredRule] = []
+    temp_rules: list[TriggeredRule] = []
+    sign_rules: list[TriggeredRule] = []
 
     # 1. Nocturnal skin temperature deviation (with optional luteal phase offset in females)
     if skin_temp_deltas_history:
-        offset = 0.0
-        if compensate_luteal_in_code and sex == 0 and cycle_phase == "luteal":
-            offset = THRESHOLDS["skin_temp_delta_c"]["luteal_offset"]
-
-        temp_limit = THRESHOLDS["skin_temp_delta_c"]["threshold"] + offset
-        last_2 = skin_temp_deltas_history[-2:] if len(skin_temp_deltas_history) >= 2 else []
-        last_3 = skin_temp_deltas_history[-3:] if len(skin_temp_deltas_history) >= 3 else []
-
-        if len(last_3) == 3 and all(dt >= temp_limit for dt in last_3):
-            temp_candidates.append(TriggeredRule(
-                metric="skin_temp_delta_c", category="G", severity="red",
-                current_value=round(skin_temp_deltas_history[-1], 2),
-                reference_threshold=f">= +{temp_limit:.1f} °C for 3 consecutive nights",
-                source=THRESHOLDS["skin_temp_delta_c"]["source"], notification_id="G1"
-            ))
-        elif len(last_2) == 2 and all(dt >= temp_limit for dt in last_2):
-            temp_candidates.append(TriggeredRule(
-                metric="skin_temp_delta_c", category="G", severity="yellow",
-                current_value=round(skin_temp_deltas_history[-1], 2),
-                reference_threshold=f">= +{temp_limit:.1f} °C for 2 consecutive nights",
-                source=THRESHOLDS["skin_temp_delta_c"]["source"], notification_id="G1"
-            ))
+        offset = THRESHOLDS["skin_temp_delta_c"]["luteal_offset"] if (compensate_luteal_in_code and sex == 0 and cycle_phase == "luteal") else 0.0
+        limit = THRESHOLDS["skin_temp_delta_c"]["threshold"] + offset
+        if len(skin_temp_deltas_history) >= 3 and all(dt >= limit for dt in skin_temp_deltas_history[-3:]):
+            temp_rules.append(_rule("skin_temp_delta_c", "G", "red", skin_temp_deltas_history[-1], f">= +{limit:.1f} °C for 3 consecutive nights", "skin_temp_delta_c", "G1"))
+        elif len(skin_temp_deltas_history) >= 2 and all(dt >= limit for dt in skin_temp_deltas_history[-2:]):
+            temp_rules.append(_rule("skin_temp_delta_c", "G", "yellow", skin_temp_deltas_history[-1], f">= +{limit:.1f} °C for 2 consecutive nights", "skin_temp_delta_c", "G1"))
 
     # 2. Core body temperature (Thermometer)
-    if core_temp_c is not None:
-        if core_temp_c > 38.0 or core_temp_c < 36.0:
-            temp_candidates.append(TriggeredRule(
-                metric="core_temp_c", category="G", severity="red",
-                current_value=round(core_temp_c, 2),
-                reference_threshold="> 38.0 °C or < 36.0 °C",
-                source=THRESHOLDS["core_temp_c"]["source"], notification_id="G1"
-            ))
+    if core_temp_c is not None and (core_temp_c > 38.0 or core_temp_c < 36.0):
+        temp_rules.append(_rule("core_temp_c", "G", "red", core_temp_c, "> 38.0 °C or < 36.0 °C", "core_temp_c", "G1"))
 
     # 3. Accompanying sign: Resting Heart Rate
     if resting_hr_bpm is not None and resting_hr_bpm > 90.0:
-        vital_sign_candidates.append(TriggeredRule(
-            metric="resting_hr_bpm", category="G", severity="red",
-            current_value=round(resting_hr_bpm, 1), reference_threshold="> 90 bpm",
-            source=THRESHOLDS["resting_hr"]["source"], notification_id="G1"
-        ))
+        sign_rules.append(_rule("resting_hr_bpm", "G", "red", resting_hr_bpm, "> 90 bpm", "resting_hr", "G1", 1))
     elif resting_hr_z is not None and resting_hr_z > 1.5:
-        vital_sign_candidates.append(TriggeredRule(
-            metric="resting_hr_bpm", category="G", severity="yellow",
-            current_value=round(resting_hr_z, 2), reference_threshold="z > +1.5 vs. baseline",
-            source=THRESHOLDS["resting_hr"]["source"], notification_id="G1"
-        ))
+        sign_rules.append(_rule("resting_hr_bpm", "G", "yellow", resting_hr_z, "z > +1.5 vs. baseline", "resting_hr", "G1"))
 
     # 4. Accompanying sign: HRV (Z_HRV = (ln RMSSD_today - mu_ln) / sigma_ln)
     if hrv_z_score is not None:
         if hrv_z_score < -2.5:
-            vital_sign_candidates.append(TriggeredRule(
-                metric="hrv_z_score", category="G", severity="red",
-                current_value=round(hrv_z_score, 2), reference_threshold="Z_HRV < -2.5",
-                source=THRESHOLDS["hrv_z_infection"]["source"], notification_id="G1"
-            ))
+            sign_rules.append(_rule("hrv_z_score", "G", "red", hrv_z_score, "Z_HRV < -2.5", "hrv_z_infection", "G1"))
         elif hrv_z_score < -1.5:
-            vital_sign_candidates.append(TriggeredRule(
-                metric="hrv_z_score", category="G", severity="yellow",
-                current_value=round(hrv_z_score, 2), reference_threshold="Z_HRV < -1.5",
-                source=THRESHOLDS["hrv_z_infection"]["source"], notification_id="G1"
-            ))
+            sign_rules.append(_rule("hrv_z_score", "G", "yellow", hrv_z_score, "Z_HRV < -1.5", "hrv_z_infection", "G1"))
 
     # 5. Accompanying sign: Respiratory Rate
     if respiratory_rate_rpm is not None and respiratory_rate_rpm > 20.0:
-        vital_sign_candidates.append(TriggeredRule(
-            metric="respiratory_rate_daily_rpm", category="G", severity="red",
-            current_value=round(respiratory_rate_rpm, 1), reference_threshold="> 20 rpm",
-            source=THRESHOLDS["respiratory_rate_rpm"]["source"], notification_id="G1"
-        ))
+        sign_rules.append(_rule("respiratory_rate_daily_rpm", "G", "red", respiratory_rate_rpm, "> 20 rpm", "respiratory_rate_rpm", "G1", 1))
     elif respiratory_rate_rising:
-        vital_sign_candidates.append(TriggeredRule(
-            metric="respiratory_rate_daily_rpm", category="G", severity="yellow",
-            current_value=round(respiratory_rate_rpm or 0.0, 1),
-            reference_threshold="Rising vs. personal baseline",
-            source=THRESHOLDS["respiratory_rate_rpm"]["source"], notification_id="G1"
-        ))
+        sign_rules.append(_rule("respiratory_rate_daily_rpm", "G", "yellow", respiratory_rate_rpm or 0.0, "Rising vs. personal baseline", "respiratory_rate_rpm", "G1", 1))
 
     # Anti-false-positive filter: requires Temperature + at least 1 other sign (HR, HRV, or RR)
-    if temp_candidates and vital_sign_candidates:
-        return temp_candidates + vital_sign_candidates
-    return []
+    return (temp_rules + sign_rules) if (temp_rules and sign_rules) else []
 
 
 def evaluate_safety(
@@ -602,71 +310,31 @@ def evaluate_safety(
     # S1: Blood glucose
     if blood_glucose_mg_dl is not None:
         if blood_glucose_mg_dl < 54.0 or blood_glucose_mg_dl > 250.0:
-            rules.append(TriggeredRule(
-                metric="blood_glucose_mg_dl", category="S", severity="red",
-                current_value=round(blood_glucose_mg_dl, 1),
-                reference_threshold="< 54 mg/dL (Level 2) or > 250 mg/dL",
-                source=THRESHOLDS["glucose_mg_dl"]["source"], notification_id="S1"
-            ))
+            rules.append(_rule("blood_glucose_mg_dl", "S", "red", blood_glucose_mg_dl, "< 54 mg/dL (Level 2) or > 250 mg/dL", "glucose_mg_dl", "S1", 1))
         elif blood_glucose_mg_dl < 70.0 or blood_glucose_mg_dl > 180.0:
-            rules.append(TriggeredRule(
-                metric="blood_glucose_mg_dl", category="S", severity="yellow",
-                current_value=round(blood_glucose_mg_dl, 1),
-                reference_threshold="< 70 mg/dL (Level 1) or > 180 mg/dL",
-                source=THRESHOLDS["glucose_mg_dl"]["source"], notification_id="S1"
-            ))
+            rules.append(_rule("blood_glucose_mg_dl", "S", "yellow", blood_glucose_mg_dl, "< 70 mg/dL (Level 1) or > 180 mg/dL", "glucose_mg_dl", "S1", 1))
 
     # S2: Estimated blood pressure
     if systolic_bp_mmhg is not None and diastolic_bp_mmhg is not None:
-        bp_str = f"{int(systolic_bp_mmhg)}/{int(diastolic_bp_mmhg)}"
+        bp = f"{int(systolic_bp_mmhg)}/{int(diastolic_bp_mmhg)}"
         if systolic_bp_mmhg >= 180.0 or diastolic_bp_mmhg >= 120.0:
-            rules.append(TriggeredRule(
-                metric="blood_pressure_mmhg", category="S", severity="red",
-                current_value=bp_str, reference_threshold=">= 180/120 mmHg (Crisis)",
-                source=THRESHOLDS["blood_pressure_mmhg"]["source"], notification_id="S2"
-            ))
+            rules.append(_rule("blood_pressure_mmhg", "S", "red", bp, ">= 180/120 mmHg (Crisis)", "blood_pressure_mmhg", "S2"))
         elif systolic_bp_mmhg >= 140.0 or diastolic_bp_mmhg >= 90.0:
-            rules.append(TriggeredRule(
-                metric="blood_pressure_mmhg", category="S", severity="yellow",
-                current_value=bp_str, reference_threshold=">= 140/90 mmHg (Stage 2)",
-                source=THRESHOLDS["blood_pressure_mmhg"]["source"], notification_id="S2"
-            ))
+            rules.append(_rule("blood_pressure_mmhg", "S", "yellow", bp, ">= 140/90 mmHg (Stage 2)", "blood_pressure_mmhg", "S2"))
 
     # S3: Oxygen saturation (Individual SpO2 or simultaneous drop in >= 2 crew members)
     if (spo2_pct is not None and spo2_pct < 90.0) or crew_spo2_drop_count >= 2:
-        rules.append(TriggeredRule(
-            metric="spo2_pct", category="S", severity="red",
-            current_value=round(spo2_pct or 0.0, 1),
-            reference_threshold="< 90% or simultaneous drop in 2+ crew members",
-            source=THRESHOLDS["spo2_pct"]["source"], notification_id="S3"
-        ))
+        rules.append(_rule("spo2_pct", "S", "red", spo2_pct or 0.0, "< 90% or simultaneous drop in 2+ crew members", "spo2_pct", "S3", 1))
     elif spo2_pct is not None and spo2_pct < 95.0:
-        rules.append(TriggeredRule(
-            metric="spo2_pct", category="S", severity="yellow",
-            current_value=round(spo2_pct, 1), reference_threshold="< 95% sustained",
-            source=THRESHOLDS["spo2_pct"]["source"], notification_id="S3"
-        ))
+        rules.append(_rule("spo2_pct", "S", "yellow", spo2_pct, "< 95% sustained", "spo2_pct", "S3", 1))
 
     # S4: Space radiation (Cumulative dose vs. Solar Particle Event SPE)
-    is_spe_active = bool(solar_event_flag) or (
-        proton_flux_pfu is not None and proton_flux_pfu >= 10.0
-    )
-    if is_spe_active:
-        rules.append(TriggeredRule(
-            metric="radiation_spe", category="S", severity="red",
-            current_value=proton_flux_pfu if proton_flux_pfu is not None else "Active SPE",
-            reference_threshold="Solar event: protons >= 10 MeV at >= 10 pfu",
-            source=THRESHOLDS["radiation"]["source"], notification_id="S4"
-        ))
+    if solar_event_flag or (proton_flux_pfu is not None and proton_flux_pfu >= 10.0):
+        rules.append(_rule("radiation_spe", "S", "red", proton_flux_pfu if proton_flux_pfu is not None else "Active SPE", "Solar event: protons >= 10 MeV at >= 10 pfu", "radiation", "S4"))
     elif cumulative_radiation_msv is not None:
-        cumulative_limit = mission_radiation_limit_msv * THRESHOLDS["radiation"]["yellow_ratio"]
-        if cumulative_radiation_msv >= cumulative_limit:
-            rules.append(TriggeredRule(
-                metric="cumulative_radiation_msv", category="S", severity="yellow",
-                current_value=round(cumulative_radiation_msv, 2),
-                reference_threshold=f"Cumulative >= 50% of limit ({cumulative_limit:.0f} mSv)",
-                source=THRESHOLDS["radiation"]["source"], notification_id="S4"
-            ))
+        limit = mission_radiation_limit_msv * THRESHOLDS["radiation"]["yellow_ratio"]
+        if cumulative_radiation_msv >= limit:
+            rules.append(_rule("cumulative_radiation_msv", "S", "yellow", cumulative_radiation_msv, f"Cumulative >= 50% of limit ({limit:.0f} mSv)", "radiation", "S4"))
 
     return rules
 
@@ -675,20 +343,16 @@ def evaluate_safety(
 # 3. TRIAGE & SAMPLING MODE ORCHESTRATOR (For daily_health_reports)
 # =====================================================================
 
-def _get_max_severity(rules: list[TriggeredRule], category: AlertCategory) -> Severity:
-    severities = [r.severity for r in rules if r.category == category]
-    if "red" in severities:
-        return "red"
-    if "yellow" in severities:
-        return "yellow"
-    return "normal"
+def _max_sev(rules: Sequence[TriggeredRule], category: AlertCategory) -> Severity:
+    severities = {r.severity for r in rules if r.category == category}
+    return "red" if "red" in severities else ("yellow" if "yellow" in severities else "normal")
 
 
 def evaluate_overall_health(
-    rules_c: list[TriggeredRule],
-    rules_f: list[TriggeredRule],
-    rules_g: list[TriggeredRule],
-    rules_s: list[TriggeredRule],
+    rules_c: Sequence[TriggeredRule],
+    rules_f: Sequence[TriggeredRule],
+    rules_g: Sequence[TriggeredRule],
+    rules_s: Sequence[TriggeredRule],
 ) -> EvaluationResult:
     """Consolidates all active rules, determines triage status and sampling mode.
 
@@ -698,63 +362,21 @@ def evaluate_overall_health(
     3. 'alert_circadian' (If F is active)
     4. 'standard'        (Nominal state)
     """
-    all_rules = rules_c + rules_f + rules_g + rules_s
-
-    category_severities: dict[AlertCategory, Severity] = {
-        "C": _get_max_severity(all_rules, "C"),
-        "F": _get_max_severity(all_rules, "F"),
-        "G": _get_max_severity(all_rules, "G"),
-        "S": _get_max_severity(all_rules, "S"),
-    }
+    all_rules = [*rules_c, *rules_f, *rules_g, *rules_s]
+    cat_sev: dict[AlertCategory, Severity] = {c: _max_sev(all_rules, c) for c in ("C", "F", "G", "S")}
 
     # Determine overall triage_status (green | yellow | red)
-    if "red" in category_severities.values():
-        triage: Literal["green", "yellow", "red"] = "red"
-    elif "yellow" in category_severities.values():
-        triage = "yellow"
+    vals = set(cat_sev.values())
+    triage: Literal["green", "yellow", "red"] = "red" if "red" in vals else ("yellow" if "yellow" in vals else "green")
+
+    # Determine the monitoring/sampling mode triggered by the alert priority
+    if cat_sev["G"] != "normal":
+        mode: SamplingMode = "alert_infection"
+    elif cat_sev["C"] != "normal":
+        mode = "alert_atrophy"
+    elif cat_sev["F"] != "normal":
+        mode = "alert_circadian"
     else:
-        triage = "green"
+        mode = "standard"
 
-    # Determine the monitoring/sampling mode triggered by the alert
-    if category_severities["G"] in ("yellow", "red"):
-        sampling_mode: SamplingMode = "alert_infection"
-    elif category_severities["C"] in ("yellow", "red"):
-        sampling_mode = "alert_atrophy"
-    elif category_severities["F"] in ("yellow", "red"):
-        sampling_mode = "alert_circadian"
-    else:
-        sampling_mode = "standard"
-
-    return EvaluationResult(
-        triage_status=triage,
-        recommended_sampling_mode=sampling_mode,
-        triggered_rules=all_rules,
-        category_severities=category_severities,
-    )
-
-
-# =====================================================================
-# QUICK USAGE EXAMPLE (Run with: python core/ranges.py)
-# =====================================================================
-if __name__ == "__main__":
-    import json
-
-    # Simulated case: Astronaut with suspected early infection (Problem G)
-    # and mild stress-induced hyperglycemia.
-    demo_rules_g = evaluate_problem_g(
-        skin_temp_deltas_history=[0.6, 0.7, 0.8],  # 3 nights >= +0.5 °C -> Red
-        core_temp_c=38.3,                          # Fever > 38 °C -> Red
-        resting_hr_bpm=94.0,                       # > 90 bpm -> Red
-        hrv_z_score=-2.7,                          # Z_HRV < -2.5 -> Red
-        respiratory_rate_rpm=22.0,                 # > 20 rpm -> Red
-    )
-    demo_rules_s = evaluate_safety(blood_glucose_mg_dl=195.0)  # Yellow (> 180 mg/dL)
-
-    evaluation = evaluate_overall_health(
-        rules_c=[],
-        rules_f=[],
-        rules_g=demo_rules_g,
-        rules_s=demo_rules_s,
-    )
-
-    print(json.dumps(evaluation.to_dict(), indent=2))
+    return EvaluationResult(triage, mode, all_rules, cat_sev)
