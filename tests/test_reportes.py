@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import shutil
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from core.resumen_diario import Baseline, SleepWindow, summarize_glucose, summarize_saliva
-from scripts.generar_datos import MissionConfig, generate_mission
 from services.database import sesion
 from services.eventos import AlertEvent, EventBus
 from services.reportes import process_days, process_mission_log
@@ -17,22 +14,9 @@ from services.reportes import process_days, process_mission_log
 DAYS = 36   # Covers the infection (30-33) and the synthetic solar event (35)
 
 
-@pytest.fixture(scope="module")
-def processed_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Mission generated and processed once for the whole module."""
-    path = tmp_path_factory.mktemp("reportes") / "mission.db"
-    generate_mission(MissionConfig(days=DAYS, seed=5), path, sync_nasa=False)
-    for log in (1, 2, 3, 4):
-        process_mission_log(log, db_path=path, bus=EventBus())
-    return path
-
-
 @pytest.fixture
-def mission_db(processed_template: Path, tmp_path: Path) -> Iterator[Path]:
-    """Private copy per test, so tests never affect each other."""
-    path = tmp_path / "copy.db"
-    shutil.copy(processed_template, path)
-    yield path
+def mission_db(mission_copy) -> Path:
+    return mission_copy(DAYS, 5)
 
 
 def _alerts(path: Path, log: int) -> set[tuple[int, str, str]]:

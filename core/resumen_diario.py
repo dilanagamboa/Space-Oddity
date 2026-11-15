@@ -30,6 +30,7 @@ from core.ecuaciones import (
     compute_smi,
     compute_sns_hpa_asymmetry_index,
 )
+from core.protocolo import SLEEP_WINDOW, SleepWindow
 
 Row = Mapping[str, Any]
 BLOCK_MINUTES: int = 15
@@ -45,10 +46,6 @@ def _hour(row: Row, column: str = "recorded_at") -> int:
 
 def _moment(row: Row, column: str = "recorded_at") -> datetime:
     return datetime.fromisoformat(str(row[column]))
-
-
-def _mean(values: Sequence[float]) -> float | None:
-    return fmean(values) if values else None
 
 
 def age_on(birth_date: date | str, on: date) -> int:
@@ -84,24 +81,8 @@ class Baseline:
 # 2. WATCH (cardiovascular_autonomic, every 15 min)
 # =====================================================================
 
-@dataclass(frozen=True)
-class SleepWindow:
-    """Scheduled sleep window in UTC hours (22:00-06:00 by default)."""
-
-    start_hour: int = 22
-    end_hour: int = 6
-
-    def contains(self, hour: int) -> bool:
-        if self.start_hour > self.end_hour:          # Crosses midnight
-            return hour >= self.start_hour or hour < self.end_hour
-        return self.start_hour <= hour < self.end_hour
-
-
-DEFAULT_SLEEP_WINDOW = SleepWindow()
-
-
 def summarize_watch(
-    rows: Sequence[Row], window: SleepWindow = DEFAULT_SLEEP_WINDOW
+    rows: Sequence[Row], window: SleepWindow = SLEEP_WINDOW
 ) -> dict[str, Any] | None:
     """Sleep architecture, nocturnal vitals and activity minutes for one day.
 

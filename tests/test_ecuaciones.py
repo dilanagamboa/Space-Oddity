@@ -9,6 +9,7 @@ Battelino 2019, van Hees 2013, Tomić Mahečić 2022) and team custom designs.
 from __future__ import annotations
 
 import math
+
 import pytest
 
 from core.ecuaciones import (
@@ -44,10 +45,8 @@ from core.ecuaciones import (
 )
 from core.puntaje import (
     build_z_penalties,
-    calculate_readiness_from_report,
     evaluate_daily_readiness,
 )
-
 
 # =====================================================================
 # 1. BASELINE & STATISTICAL EQUATIONS (Mishra 2020, Task Force 1996)
@@ -196,4 +195,3 @@ def test_readiness_penalties_and_score() -> None:
     }
     assert breakdown.z_penalties == pytest.approx(expected_penalties)
     assert breakdown.readiness_score == pytest.approx(41.9)
-    assert calculate_readiness_from_report(report) == pytest.approx(41.9)

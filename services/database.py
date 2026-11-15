@@ -63,11 +63,6 @@ def a_texto_momento(valor: datetime) -> str:
     return valor.strftime(FORMATO_MOMENTO)
 
 
-def ahora_utc() -> str:
-    """Momento actual en UTC, ya formateado para guardar."""
-    return a_texto_momento(datetime.now(UTC))
-
-
 def _a_sql(valor: Any) -> Any:
     """Convierte un valor de Python al tipo que se guarda en SQLite."""
     if isinstance(valor, Enum):

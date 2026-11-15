@@ -212,6 +212,52 @@ class SpaceWeatherSource(Protocol):
         ...
 
 
+def _max_nested(list_field: str, value_field: str) -> Callable[[Mapping[str, Any]], float | None]:
+    """Extractor of the maximum ``value_field`` inside the list ``list_field``."""
+
+    def extract(item: Mapping[str, Any]) -> float | None:
+        values = [
+            v[value_field] for v in (item.get(list_field) or [])
+            if isinstance(v, Mapping) and v.get(value_field) is not None
+        ]
+        return max(values) if values else None
+
+    return extract
+
+
+@dataclass(frozen=True)
+class DonkiSpec:
+    """Where each DONKI event type keeps its ID, start time and intensity."""
+
+    id_field: str
+    start_field: str
+    intensity: Callable[[Mapping[str, Any]], float | None] = lambda item: None
+    unit: str | None = None
+
+
+DONKI_SPECS: dict[str, DonkiSpec] = {
+    "SEP": DonkiSpec("sepID", "eventTime"),
+    "FLR": DonkiSpec("flrID", "beginTime", lambda i: flare_class_to_flux(i.get("classType")), "W/m2"),
+    "CME": DonkiSpec("activityID", "startTime", _max_nested("cmeAnalyses", "speed"), "km/s"),
+    "GST": DonkiSpec("gstID", "startTime", _max_nested("allKpIndex", "kpIndex"), "Kp"),
+}
+
+
+def parse_donki_event(event_type: str, item: Mapping[str, Any]) -> SpaceWeatherEvent | None:
+    """Adapts one DONKI JSON object to ``SpaceWeatherEvent`` (``None`` if incomplete)."""
+    spec = DONKI_SPECS[event_type]
+    start = parse_time(item.get(spec.start_field))
+    if not item.get(spec.id_field) or start is None:
+        return None
+    intensity = spec.intensity(item)
+    return SpaceWeatherEvent(
+        external_id=item[spec.id_field], source="nasa_donki", event_type=event_type,
+        start_time=start, peak_time=parse_time(item.get("peakTime")),
+        end_time=parse_time(item.get("endTime")), intensity=intensity,
+        intensity_unit=spec.unit if intensity is not None else None, raw=item,
+    )
+
+
 class DonkiClient:
     """NASA DONKI adapter (SEP, flares, CMEs and geomagnetic storms).
 
@@ -229,7 +275,7 @@ class DonkiClient:
     """
 
     name: Source = "nasa_donki"
-    DEFAULT_TYPES: tuple[str, ...] = ("SEP", "FLR", "CME", "GST")
+    DEFAULT_TYPES: tuple[str, ...] = tuple(DONKI_SPECS)
 
     def __init__(
         self,
@@ -248,12 +294,6 @@ class DonkiClient:
         self.partial_errors: dict[str, str] = {}
         self.collected: list[SpaceWeatherEvent] = []
         self._dead_urls: set[str] = set()
-        self._parsers: dict[str, Callable[[Mapping[str, Any]], SpaceWeatherEvent | None]] = {
-            "SEP": self._parse_sep,
-            "FLR": self._parse_flare,
-            "CME": self._parse_cme,
-            "GST": self._parse_gst,
-        }
 
     def fetch(self, start: date, end: date) -> list[SpaceWeatherEvent]:
         self.partial_errors = {}
@@ -266,10 +306,7 @@ class DonkiClient:
             except SpaceWeatherUnavailable as exc:
                 self.partial_errors[event_type] = str(exc)
                 continue
-            for item in items:
-                parsed = self._parsers[event_type](item)
-                if parsed is not None:
-                    events.append(parsed)
+            events.extend(e for item in items if (e := parse_donki_event(event_type, item)))
         if len(self.partial_errors) == len(self._event_types):
             raise SpaceWeatherUnavailable(" | ".join(self.partial_errors.values()))
         return events
@@ -297,56 +334,6 @@ class DonkiClient:
         if not errors:
             errors.append("every DONKI address already failed in this run")
         raise SpaceWeatherUnavailable(f"DONKI {event_type}: " + " | ".join(errors))
-
-    # --- One adapter per event type ----------------------------------------
-    def _parse_sep(self, item: Mapping[str, Any]) -> SpaceWeatherEvent | None:
-        start = parse_time(item.get("eventTime"))
-        if not item.get("sepID") or start is None:
-            return None
-        return SpaceWeatherEvent(
-            external_id=item["sepID"], source=self.name, event_type="SEP",
-            start_time=start, raw=item,
-        )
-
-    def _parse_flare(self, item: Mapping[str, Any]) -> SpaceWeatherEvent | None:
-        start = parse_time(item.get("beginTime"))
-        if not item.get("flrID") or start is None:
-            return None
-        return SpaceWeatherEvent(
-            external_id=item["flrID"], source=self.name, event_type="FLR",
-            start_time=start, peak_time=parse_time(item.get("peakTime")),
-            end_time=parse_time(item.get("endTime")),
-            intensity=flare_class_to_flux(item.get("classType")), intensity_unit="W/m2",
-            raw=item,
-        )
-
-    def _parse_cme(self, item: Mapping[str, Any]) -> SpaceWeatherEvent | None:
-        start = parse_time(item.get("startTime"))
-        if not item.get("activityID") or start is None:
-            return None
-        speeds = [
-            a.get("speed") for a in (item.get("cmeAnalyses") or [])
-            if isinstance(a, Mapping) and a.get("speed") is not None
-        ]
-        return SpaceWeatherEvent(
-            external_id=item["activityID"], source=self.name, event_type="CME",
-            start_time=start, intensity=max(speeds) if speeds else None,
-            intensity_unit="km/s" if speeds else None, raw=item,
-        )
-
-    def _parse_gst(self, item: Mapping[str, Any]) -> SpaceWeatherEvent | None:
-        start = parse_time(item.get("startTime"))
-        if not item.get("gstID") or start is None:
-            return None
-        kp_values = [
-            k.get("kpIndex") for k in (item.get("allKpIndex") or [])
-            if isinstance(k, Mapping) and k.get("kpIndex") is not None
-        ]
-        return SpaceWeatherEvent(
-            external_id=item["gstID"], source=self.name, event_type="GST",
-            start_time=start, intensity=max(kp_values) if kp_values else None,
-            intensity_unit="Kp" if kp_values else None, raw=item,
-        )
 
 
 @dataclass(frozen=True)
@@ -437,7 +424,6 @@ class NoaaSwpcClient:
 class SyncReport:
     """Summary of a synchronization run."""
 
-    fetched: dict[str, int] = field(default_factory=dict)
     inserted: dict[str, int] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
 
@@ -529,7 +515,6 @@ def sync_space_weather(
             events = outcome
         for part, error in getattr(source, "partial_errors", {}).items():
             report.errors[f"{source.name}:{part}"] = error
-        report.fetched[source.name] = len(events)
         report.inserted[source.name] = repos.clima_espacial.insertar_nuevos(
             [event.to_row() for event in events]
         )

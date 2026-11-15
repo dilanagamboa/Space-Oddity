@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
 
 from core.enums import EscenarioSimulacion
-from scripts.generar_datos import MissionConfig, generate_mission
 from services.database import sesion
 from services.eventos import EventBus
-from services.reportes import process_mission_log
 from services.simulador import (
     EFFECTS,
     SimulationError,
@@ -28,20 +25,9 @@ EXPECTED = {
 }
 
 
-@pytest.fixture(scope="module")
-def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    path = tmp_path_factory.mktemp("sim") / "mission.db"
-    generate_mission(MissionConfig(days=DAYS, seed=9), path, sync_nasa=False)
-    for log in (1, 2, 3, 4):
-        process_mission_log(log, db_path=path, bus=EventBus())
-    return path
-
-
 @pytest.fixture
-def db_path(template: Path, tmp_path: Path) -> Path:
-    path = tmp_path / "copy.db"
-    shutil.copy(template, path)
-    return path
+def db_path(mission_copy) -> Path:
+    return mission_copy(DAYS, 9)
 
 
 def _real_snapshot(path: Path, log: int) -> tuple:

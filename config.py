@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any
 
 BASE_DIR: Path = Path(__file__).resolve().parent
-DATA_DIR: Path = BASE_DIR / "data"
-DB_PATH: Path = DATA_DIR / "astro.db"
+DB_PATH: Path = BASE_DIR / "data" / "astro.db"
 SCHEMA_PATH: Path = BASE_DIR / "scripts" / "schema.sql"
 
 

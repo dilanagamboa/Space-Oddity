@@ -11,13 +11,15 @@ Architecture rule: Importing streamlit or sqlite3 inside core/ is strictly forbi
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
+from operator import ge, gt, le, lt
 from typing import Any, Literal
 
 Severity = Literal["normal", "yellow", "red"]
 AlertCategory = Literal["C", "F", "G", "S"]
 SamplingMode = Literal["standard", "alert_infection", "alert_atrophy", "alert_circadian"]
+Compare = Callable[[float, float], bool]
 
 
 @dataclass(frozen=True)
@@ -61,15 +63,17 @@ THRESHOLDS: dict[str, dict[str, Any]] = {
     "visceral_fat_area_cm2": {"yellow": 100.0, "source": "JSSO 2002 / Team [4]"},
     "visceral_fat_tanita": {"yellow": 13.0, "red": 20.0, "source": "Tanita / Team [5]"},
     # --- PROBLEM F: Circadian rhythm, sleep, and HPA axis ---
-    "sleep_hours": {"yellow": 6.0, "red": 5.0, "source": "AASM/SRS Watson 2015 / Team [9]"},
-    "car_delta_nmol_l": {"yellow": 2.5, "source": "Wüst 2000 / Team [10]"},
+    "sleep_hours": {"yellow": 6.0, "red": 5.0, "yellow_nights": 3, "red_nights": 2,
+                    "source": "AASM/SRS Watson 2015 / Team [9]"},
+    "car_delta_nmol_l": {"yellow": 2.5, "red_weeks": 2, "source": "Wüst 2000 / Team [10]"},
     "cortisol_morning_nmol_l": {"min": 13.0, "max": 24.0, "source": "Medicina 2021 [12]"},
     "cortisol_afternoon_nmol_l": {"min": 3.0, "max": 8.0, "source": "Medicina 2021 [12]"},
     "cortisol_night_nmol_l": {"yellow": 4.0, "source": "Medicina 2021 [12]"},
     "aucg_cortisol_z": {"yellow": 1.5, "red": 3.0, "source": "Pruessner 2003 [11]"},
     "cortisol_dhea_ratio_z": {"yellow": 1.5, "red": 3.0, "source": "Mehta 2017 / Team"},
     "saa_z": {"yellow": 2.0, "source": "Nater & Rohleder 2009 [14]"},
-    "hrv_rmssd_z_circadian": {"yellow": -1.5, "red": -3.0, "source": "Task Force 1996 / Nunan 2010 [15][16]"},
+    "hrv_rmssd_z_circadian": {"yellow": -1.5, "red": -3.0,
+                              "source": "Task Force 1996 / Nunan 2010 [15][16]"},
     "hrv_sdnn_z": {"yellow": -1.5, "source": "Nunan 2010 [16]"},
     # --- PROBLEM G: Early infection ---
     "skin_temp_delta_c": {"threshold": 0.5, "luteal_offset": 0.4, "source": "Oura / Team [19]"},
@@ -94,6 +98,35 @@ def _rule(metric: str, cat: AlertCategory, sev: Severity, val: float | str,
     return TriggeredRule(metric, cat, sev, v, ref, THRESHOLDS[key]["source"], notif)
 
 
+def _graded(
+    rules: list[TriggeredRule], metric: str, cat: AlertCategory, value: float | None, key: str,
+    notif: str, *, red: Compare, yellow: Compare | None = None, ref: str, digits: int = 2,
+) -> Severity | None:
+    """Appends a red or yellow rule when ``value`` crosses ``THRESHOLDS[key]``.
+
+    ``red`` / ``yellow`` are comparisons such as ``operator.gt`` (``yellow`` defaults
+    to ``red``). ``ref`` is formatted with ``{limit}``. Returns the severity added.
+    """
+    if value is None:
+        return None
+    for sev, compare in (("red", red), ("yellow", yellow or red)):
+        limit = THRESHOLDS[key].get(sev)
+        if limit is not None and compare(value, limit):
+            rules.append(_rule(metric, cat, sev, value, ref.format(limit=limit), key, notif, digits))
+            return sev
+    return None
+
+
+def _outside(value: float | None, key: str) -> bool:
+    cfg = THRESHOLDS[key]
+    return value is not None and not (cfg["min"] <= value <= cfg["max"])
+
+
+def _streak(history: Sequence[float], nights: int, crossed: Callable[[float], bool]) -> bool:
+    """True if the last ``nights`` values all cross the limit."""
+    return len(history) >= nights and all(crossed(h) for h in history[-nights:])
+
+
 # =====================================================================
 # 2. SUBSYSTEM CLINICAL EVALUATORS
 # =====================================================================
@@ -109,54 +142,33 @@ def evaluate_problem_c(
 ) -> list[TriggeredRule]:
     """Evaluates Problem C: Muscle loss, malnutrition, and visceral fat (C1-C3)."""
     rules: list[TriggeredRule] = []
+    _graded(rules, "delta_mass_pct", "C", delta_mass_pct, "delta_mass_pct", "C1",
+            red=gt, yellow=ge, ref=">= {limit}% loss in <= 6 months (GLIM)")
+    _graded(rules, "bmi", "C", bmi, "bmi", "C1", red=lt, ref="< {limit} kg/m²")
 
-    # 1. Body mass loss percentage (GLIM criteria)
-    if delta_mass_pct is not None:
-        if delta_mass_pct > THRESHOLDS["delta_mass_pct"]["red"]:
-            rules.append(_rule("delta_mass_pct", "C", "red", delta_mass_pct, "> 10% in <= 6 months (GLIM Stage 2)", "delta_mass_pct", "C1"))
-        elif delta_mass_pct >= THRESHOLDS["delta_mass_pct"]["yellow"]:
-            rules.append(_rule("delta_mass_pct", "C", "yellow", delta_mass_pct, "5-10% in <= 6 months (GLIM Stage 1)", "delta_mass_pct", "C1"))
-
-    # 2. Body Mass Index (BMI)
-    if bmi is not None:
-        if bmi < THRESHOLDS["bmi"]["red"]:
-            rules.append(_rule("bmi", "C", "red", bmi, "< 18.5 kg/m²", "bmi", "C1"))
-        elif bmi < THRESHOLDS["bmi"]["yellow"]:
-            rules.append(_rule("bmi", "C", "yellow", bmi, "< 20.0 kg/m²", "bmi", "C1"))
-
-    # 3. Skeletal Muscle Index (SMI) by sex
-    is_low_smi = False
-    if smi_total_kg_m2 is not None:
-        smi_key = "smi_male" if sex == 1 else "smi_female"
-        cfg = THRESHOLDS[smi_key]
-        if smi_total_kg_m2 <= cfg["red"]:
-            is_low_smi = True
-            rules.append(_rule("smi_total_kg_m2", "C", "red", smi_total_kg_m2, f"<= {cfg['red']} kg/m²", smi_key, "C2"))
-        elif smi_total_kg_m2 <= cfg["yellow"]:
-            is_low_smi = True
-            rules.append(_rule("smi_total_kg_m2", "C", "yellow", smi_total_kg_m2, f"<= {cfg['yellow']} kg/m²", smi_key, "C2"))
-
-    # 4. Appendicular Skeletal Muscle Index (ASMI) optional
+    smi_key = "smi_male" if sex == 1 else "smi_female"
+    is_low_smi = _graded(rules, "smi_total_kg_m2", "C", smi_total_kg_m2, smi_key, "C2",
+                         red=le, ref="<= {limit} kg/m²") is not None
     if asmi_kg_m2 is not None:
         limit = THRESHOLDS["asmi_bia"]["male" if sex == 1 else "female"]
         if asmi_kg_m2 < limit:
             is_low_smi = True
-            rules.append(_rule("asmi_kg_m2", "C", "red", asmi_kg_m2, f"< {limit} kg/m² (BIA)", "asmi_bia", "C2"))
+            rules.append(_rule("asmi_kg_m2", "C", "red", asmi_kg_m2, f"< {limit} kg/m² (BIA)",
+                               "asmi_bia", "C2"))
 
-    # 5. Visceral fat area (cm2 + sarcopenic obesity combination)
-    if visceral_fat_area_cm2 is not None and visceral_fat_area_cm2 >= THRESHOLDS["visceral_fat_area_cm2"]["yellow"]:
+    # Visceral fat counts as red when muscle is also low (sarcopenic obesity)
+    area_limit = THRESHOLDS["visceral_fat_area_cm2"]["yellow"]
+    if visceral_fat_area_cm2 is not None and visceral_fat_area_cm2 >= area_limit:
         sev: Severity = "red" if is_low_smi else "yellow"
-        ref = ">= 100 cm² + low SMI (Sarcopenic obesity)" if is_low_smi else ">= 100 cm²"
-        rules.append(_rule("visceral_fat_area_cm2", "C", sev, visceral_fat_area_cm2, ref, "visceral_fat_area_cm2", "C3", 1))
-
-    # 6. Visceral fat level (Tanita scale 1-59)
-    if visceral_fat_level is not None:
-        t_cfg = THRESHOLDS["visceral_fat_tanita"]
-        if visceral_fat_level >= t_cfg["red"] or (visceral_fat_level >= t_cfg["yellow"] and is_low_smi):
-            rules.append(_rule("visceral_fat_level", "C", "red", visceral_fat_level, ">= 20 (or >= 13 with low SMI)", "visceral_fat_tanita", "C3"))
-        elif visceral_fat_level >= t_cfg["yellow"]:
-            rules.append(_rule("visceral_fat_level", "C", "yellow", visceral_fat_level, "13 - 19 (Tanita scale)", "visceral_fat_tanita", "C3"))
-
+        ref = f">= {area_limit:g} cm²" + (" + low SMI (sarcopenic obesity)" if is_low_smi else "")
+        rules.append(_rule("visceral_fat_area_cm2", "C", sev, visceral_fat_area_cm2, ref,
+                           "visceral_fat_area_cm2", "C3", 1))
+    tanita = THRESHOLDS["visceral_fat_tanita"]
+    if visceral_fat_level is not None and visceral_fat_level >= tanita["yellow"]:
+        red = visceral_fat_level >= tanita["red"] or is_low_smi
+        ref = f">= {tanita['red']:g} (or >= {tanita['yellow']:g} with low SMI)" if red else "Tanita 13-19"
+        rules.append(_rule("visceral_fat_level", "C", "red" if red else "yellow", visceral_fat_level, ref,
+                           "visceral_fat_tanita", "C3"))
     return rules
 
 
@@ -178,61 +190,49 @@ def evaluate_problem_f(
     """Evaluates Problem F: Circadian misalignment, sleep, and HPA axis (F1)."""
     rules: list[TriggeredRule] = []
 
-    # 1. Consecutive nights of sleep deprivation
-    if sleep_hours_history:
-        if len(sleep_hours_history) >= 2 and all(h < 5.0 for h in sleep_hours_history[-2:]):
-            rules.append(_rule("sleep_total_min", "F", "red", sleep_hours_history[-1], "< 5 h for 2 consecutive nights", "sleep_hours", "F1"))
-        elif len(sleep_hours_history) >= 3 and all(h < 6.0 for h in sleep_hours_history[-3:]):
-            rules.append(_rule("sleep_total_min", "F", "yellow", sleep_hours_history[-1], "< 6 h for 3 consecutive nights", "sleep_hours", "F1"))
+    sleep = THRESHOLDS["sleep_hours"]
+    for sev in ("red", "yellow") if sleep_hours_history else ():
+        nights = sleep[f"{sev}_nights"]
+        if _streak(sleep_hours_history, nights, lambda h, s=sev: h < sleep[s]):
+            ref = f"< {sleep[sev]:g} h for {nights} consecutive nights"
+            last = sleep_hours_history[-1]
+            rules.append(_rule("sleep_total_min", "F", sev, last, ref, "sleep_hours", "F1"))
+            break
 
-    # 2. Cortisol Awakening Response (CAR)
-    if car_absolute_nmol_l is not None and car_absolute_nmol_l < THRESHOLDS["car_delta_nmol_l"]["yellow"]:
-        sev: Severity = "red" if car_blunted_consecutive_weeks >= 2 else "yellow"
-        ref = "Blunted CAR (< +2.5 nmol/L) for 2 consecutive weeks" if sev == "red" else "Increase < +2.5 nmol/L at +30 min"
-        rules.append(_rule("car_absolute_nmol_l", "F", sev, car_absolute_nmol_l, ref, "car_delta_nmol_l", "F1"))
+    car = THRESHOLDS["car_delta_nmol_l"]
+    if car_absolute_nmol_l is not None and car_absolute_nmol_l < car["yellow"]:
+        blunted = car_blunted_consecutive_weeks >= car["red_weeks"]
+        ref = f"CAR < +{car['yellow']} nmol/L" + (" for consecutive weeks" if blunted else "")
+        rules.append(_rule("car_absolute_nmol_l", "F", "red" if blunted else "yellow", car_absolute_nmol_l,
+                           ref, "car_delta_nmol_l", "F1"))
 
-    # 3. Salivary cortisol by time slot
-    if cortisol_morning_nmol_l is not None and not (13.0 <= cortisol_morning_nmol_l <= 24.0):
-        rules.append(_rule("cortisol_07_08h", "F", "yellow", cortisol_morning_nmol_l, "Outside 13-24 nmol/L range", "cortisol_morning_nmol_l", "F1"))
-    if cortisol_afternoon_nmol_l is not None and not (3.0 <= cortisol_afternoon_nmol_l <= 8.0):
-        rules.append(_rule("cortisol_16_17h", "F", "yellow", cortisol_afternoon_nmol_l, "Outside 3-8 nmol/L range", "cortisol_afternoon_nmol_l", "F1"))
-    if cortisol_night_nmol_l is not None and cortisol_night_nmol_l > 4.0:
-        rising = cortisol_dhea_ratio_rising or (cortisol_dhea_ratio_z is not None and cortisol_dhea_ratio_z > 1.5)
-        sev = "red" if rising else "yellow"
-        ref = "> 4 nmol/L + rising C/DHEA ratio" if rising else "> 4 nmol/L (23-24 h)"
-        rules.append(_rule("cortisol_23_24h", "F", sev, cortisol_night_nmol_l, ref, "cortisol_night_nmol_l", "F1"))
+    for metric, value, key in (("cortisol_07_08h", cortisol_morning_nmol_l, "cortisol_morning_nmol_l"),
+                               ("cortisol_16_17h", cortisol_afternoon_nmol_l, "cortisol_afternoon_nmol_l")):
+        if _outside(value, key):
+            cfg = THRESHOLDS[key]
+            ref = f"Outside {cfg['min']:g}-{cfg['max']:g} nmol/L"
+            rules.append(_rule(metric, "F", "yellow", value, ref, key, "F1"))
 
-    # 4. Total daily cortisol output (AUCg Z-score)
-    if aucg_cortisol_z is not None:
-        if aucg_cortisol_z > 3.0:
-            rules.append(_rule("aucg_cortisol", "F", "red", aucg_cortisol_z, "z > +3.0", "aucg_cortisol_z", "F1"))
-        elif aucg_cortisol_z > 1.5:
-            rules.append(_rule("aucg_cortisol", "F", "yellow", aucg_cortisol_z, "z > +1.5", "aucg_cortisol_z", "F1"))
+    night_limit = THRESHOLDS["cortisol_night_nmol_l"]["yellow"]
+    if cortisol_night_nmol_l is not None and cortisol_night_nmol_l > night_limit:
+        rising = cortisol_dhea_ratio_rising or (
+            cortisol_dhea_ratio_z is not None
+            and cortisol_dhea_ratio_z > THRESHOLDS["cortisol_dhea_ratio_z"]["yellow"]
+        )
+        ref = f"> {night_limit:g} nmol/L (23-24 h)" + (" + rising C/DHEA ratio" if rising else "")
+        rules.append(_rule("cortisol_23_24h", "F", "red" if rising else "yellow", cortisol_night_nmol_l,
+                           ref, "cortisol_night_nmol_l", "F1"))
 
-    # 5. Diurnal cortisol slope
+    z_up, z_down = "z > +{limit} vs. baseline", "z < {limit} vs. baseline"
+    _graded(rules, "aucg_cortisol", "F", aucg_cortisol_z, "aucg_cortisol_z", "F1", red=gt, ref=z_up)
     if cortisol_diurnal_slope_flattened:
-        rules.append(_rule("cortisol_diurnal_slope", "F", "yellow", "Flattened", "Flattened slope vs. baseline", "cortisol_night_nmol_l", "F1"))
-
-    # 6. Cortisol/DHEA molar ratio (Z-score)
-    if cortisol_dhea_ratio_z is not None:
-        if cortisol_dhea_ratio_z > 3.0:
-            rules.append(_rule("cortisol_dhea_molar_ratio", "F", "red", cortisol_dhea_ratio_z, "z > +3.0 vs. baseline", "cortisol_dhea_ratio_z", "F1"))
-        elif cortisol_dhea_ratio_z > 1.5:
-            rules.append(_rule("cortisol_dhea_molar_ratio", "F", "yellow", cortisol_dhea_ratio_z, "z > +1.5 vs. baseline", "cortisol_dhea_ratio_z", "F1"))
-
-    # 7. Salivary alpha-amylase (sAA Z-score)
-    if saa_z is not None and saa_z > 2.0:
-        rules.append(_rule("salivary_alpha_amylase_u_ml", "F", "yellow", saa_z, "z > +2.0 vs. baseline", "saa_z", "F1"))
-
-    # 8. Resting HRV RMSSD and SDNN (Autonomic/Circadian axis)
-    if hrv_rmssd_z is not None:
-        if hrv_rmssd_z < -3.0:
-            rules.append(_rule("hrv_rmssd_daily_ms", "F", "red", hrv_rmssd_z, "z < -3.0", "hrv_rmssd_z_circadian", "F1"))
-        elif hrv_rmssd_z < -1.5:
-            rules.append(_rule("hrv_rmssd_daily_ms", "F", "yellow", hrv_rmssd_z, "z < -1.5", "hrv_rmssd_z_circadian", "F1"))
-    if hrv_sdnn_z is not None and hrv_sdnn_z < -1.5:
-        rules.append(_rule("hrv_sdnn_daily_ms", "F", "yellow", hrv_sdnn_z, "z < -1.5", "hrv_sdnn_z", "F1"))
-
+        rules.append(_rule("cortisol_diurnal_slope", "F", "yellow", "Flattened",
+                           "Flattened slope vs. baseline", "cortisol_night_nmol_l", "F1"))
+    _graded(rules, "cortisol_dhea_molar_ratio", "F", cortisol_dhea_ratio_z, "cortisol_dhea_ratio_z", "F1",
+            red=gt, ref=z_up)
+    _graded(rules, "salivary_alpha_amylase_u_ml", "F", saa_z, "saa_z", "F1", red=gt, ref=z_up)
+    _graded(rules, "hrv_rmssd_daily_ms", "F", hrv_rmssd_z, "hrv_rmssd_z_circadian", "F1", red=lt, ref=z_down)
+    _graded(rules, "hrv_sdnn_daily_ms", "F", hrv_sdnn_z, "hrv_sdnn_z", "F1", red=lt, ref=z_down)
     return rules
 
 
@@ -250,46 +250,45 @@ def evaluate_problem_g(
 ) -> list[TriggeredRule]:
     """Evaluates Problem G: Early infection and sepsis risk (G1).
 
-    Mandatory combined rule (Section 5.3):
-    Alert G triggers ONLY if temperature abnormality (nocturnal skin temp or core temp)
-    coincides with at least one accompanying autonomic/vital sign (HR, HRV, or RR).
+    Mandatory combined rule (Section 5.3): alert G triggers ONLY if a temperature
+    abnormality (nocturnal skin or core) coincides with at least one accompanying
+    sign (HR, HRV or RR).
     """
     temp_rules: list[TriggeredRule] = []
     sign_rules: list[TriggeredRule] = []
 
-    # 1. Nocturnal skin temperature deviation (with optional luteal phase offset in females)
-    if skin_temp_deltas_history:
-        offset = THRESHOLDS["skin_temp_delta_c"]["luteal_offset"] if (compensate_luteal_in_code and sex == 0 and cycle_phase == "luteal") else 0.0
-        limit = THRESHOLDS["skin_temp_delta_c"]["threshold"] + offset
-        if len(skin_temp_deltas_history) >= 3 and all(dt >= limit for dt in skin_temp_deltas_history[-3:]):
-            temp_rules.append(_rule("skin_temp_delta_c", "G", "red", skin_temp_deltas_history[-1], f">= +{limit:.1f} °C for 3 consecutive nights", "skin_temp_delta_c", "G1"))
-        elif len(skin_temp_deltas_history) >= 2 and all(dt >= limit for dt in skin_temp_deltas_history[-2:]):
-            temp_rules.append(_rule("skin_temp_delta_c", "G", "yellow", skin_temp_deltas_history[-1], f">= +{limit:.1f} °C for 2 consecutive nights", "skin_temp_delta_c", "G1"))
+    skin = THRESHOLDS["skin_temp_delta_c"]
+    luteal = compensate_luteal_in_code and sex == 0 and cycle_phase == "luteal"
+    limit = skin["threshold"] + (skin["luteal_offset"] if luteal else 0.0)
+    for sev, nights in (("red", 3), ("yellow", 2)) if skin_temp_deltas_history else ():
+        if _streak(skin_temp_deltas_history, nights, lambda dt: dt >= limit):
+            ref = f">= +{limit:.1f} °C for {nights} consecutive nights"
+            temp_rules.append(_rule("skin_temp_delta_c", "G", sev, skin_temp_deltas_history[-1], ref,
+                                    "skin_temp_delta_c", "G1"))
+            break
+    if _outside(core_temp_c, "core_temp_c"):
+        core = THRESHOLDS["core_temp_c"]
+        temp_rules.append(_rule("core_temp_c", "G", "red", core_temp_c,
+                                f"> {core['max']} °C or < {core['min']} °C", "core_temp_c", "G1"))
 
-    # 2. Core body temperature (Thermometer)
-    if core_temp_c is not None and (core_temp_c > 38.0 or core_temp_c < 36.0):
-        temp_rules.append(_rule("core_temp_c", "G", "red", core_temp_c, "> 38.0 °C or < 36.0 °C", "core_temp_c", "G1"))
-
-    # 3. Accompanying sign: Resting Heart Rate
-    if resting_hr_bpm is not None and resting_hr_bpm > 90.0:
-        sign_rules.append(_rule("resting_hr_bpm", "G", "red", resting_hr_bpm, "> 90 bpm", "resting_hr", "G1", 1))
-    elif resting_hr_z is not None and resting_hr_z > 1.5:
-        sign_rules.append(_rule("resting_hr_bpm", "G", "yellow", resting_hr_z, "z > +1.5 vs. baseline", "resting_hr", "G1"))
-
-    # 4. Accompanying sign: HRV (Z_HRV = (ln RMSSD_today - mu_ln) / sigma_ln)
-    if hrv_z_score is not None:
-        if hrv_z_score < -2.5:
-            sign_rules.append(_rule("hrv_z_score", "G", "red", hrv_z_score, "Z_HRV < -2.5", "hrv_z_infection", "G1"))
-        elif hrv_z_score < -1.5:
-            sign_rules.append(_rule("hrv_z_score", "G", "yellow", hrv_z_score, "Z_HRV < -1.5", "hrv_z_infection", "G1"))
-
-    # 5. Accompanying sign: Respiratory Rate
-    if respiratory_rate_rpm is not None and respiratory_rate_rpm > 20.0:
-        sign_rules.append(_rule("respiratory_rate_daily_rpm", "G", "red", respiratory_rate_rpm, "> 20 rpm", "respiratory_rate_rpm", "G1", 1))
+    hr = THRESHOLDS["resting_hr"]
+    if resting_hr_bpm is not None and resting_hr_bpm > hr["red_bpm"]:
+        sign_rules.append(_rule("resting_hr_bpm", "G", "red", resting_hr_bpm, f"> {hr['red_bpm']:g} bpm",
+                                "resting_hr", "G1", 1))
+    elif resting_hr_z is not None and resting_hr_z > hr["yellow_z"]:
+        sign_rules.append(_rule("resting_hr_bpm", "G", "yellow", resting_hr_z,
+                                f"z > +{hr['yellow_z']} vs. baseline", "resting_hr", "G1"))
+    _graded(sign_rules, "hrv_z_score", "G", hrv_z_score, "hrv_z_infection", "G1",
+            red=lt, ref="Z_HRV < {limit}")
+    rr_limit = THRESHOLDS["respiratory_rate_rpm"]["red"]
+    if respiratory_rate_rpm is not None and respiratory_rate_rpm > rr_limit:
+        sign_rules.append(_rule("respiratory_rate_daily_rpm", "G", "red", respiratory_rate_rpm,
+                                f"> {rr_limit:g} rpm", "respiratory_rate_rpm", "G1", 1))
     elif respiratory_rate_rising:
-        sign_rules.append(_rule("respiratory_rate_daily_rpm", "G", "yellow", respiratory_rate_rpm or 0.0, "Rising vs. personal baseline", "respiratory_rate_rpm", "G1", 1))
+        sign_rules.append(_rule("respiratory_rate_daily_rpm", "G", "yellow", respiratory_rate_rpm or 0.0,
+                                "Rising vs. personal baseline", "respiratory_rate_rpm", "G1", 1))
 
-    # Anti-false-positive filter: requires Temperature + at least 1 other sign (HR, HRV, or RR)
+    # Anti-false-positive filter: temperature + at least one accompanying sign
     return (temp_rules + sign_rules) if (temp_rules and sign_rules) else []
 
 
@@ -307,35 +306,43 @@ def evaluate_safety(
     """Evaluates direct dashboard safety indicators (S1-S4)."""
     rules: list[TriggeredRule] = []
 
-    # S1: Blood glucose
-    if blood_glucose_mg_dl is not None:
-        if blood_glucose_mg_dl < 54.0 or blood_glucose_mg_dl > 250.0:
-            rules.append(_rule("blood_glucose_mg_dl", "S", "red", blood_glucose_mg_dl, "< 54 mg/dL (Level 2) or > 250 mg/dL", "glucose_mg_dl", "S1", 1))
-        elif blood_glucose_mg_dl < 70.0 or blood_glucose_mg_dl > 180.0:
-            rules.append(_rule("blood_glucose_mg_dl", "S", "yellow", blood_glucose_mg_dl, "< 70 mg/dL (Level 1) or > 180 mg/dL", "glucose_mg_dl", "S1", 1))
+    g = THRESHOLDS["glucose_mg_dl"]
+    for sev in ("red", "yellow") if blood_glucose_mg_dl is not None else ():
+        low, high = g[f"{sev}_low"], g[f"{sev}_high"]
+        if blood_glucose_mg_dl < low or blood_glucose_mg_dl > high:
+            rules.append(_rule("blood_glucose_mg_dl", "S", sev, blood_glucose_mg_dl,
+                               f"< {low:g} or > {high:g} mg/dL", "glucose_mg_dl", "S1", 1))
+            break
 
-    # S2: Estimated blood pressure
-    if systolic_bp_mmhg is not None and diastolic_bp_mmhg is not None:
-        bp = f"{int(systolic_bp_mmhg)}/{int(diastolic_bp_mmhg)}"
-        if systolic_bp_mmhg >= 180.0 or diastolic_bp_mmhg >= 120.0:
-            rules.append(_rule("blood_pressure_mmhg", "S", "red", bp, ">= 180/120 mmHg (Crisis)", "blood_pressure_mmhg", "S2"))
-        elif systolic_bp_mmhg >= 140.0 or diastolic_bp_mmhg >= 90.0:
-            rules.append(_rule("blood_pressure_mmhg", "S", "yellow", bp, ">= 140/90 mmHg (Stage 2)", "blood_pressure_mmhg", "S2"))
+    bp = THRESHOLDS["blood_pressure_mmhg"]
+    has_bp = systolic_bp_mmhg is not None and diastolic_bp_mmhg is not None
+    for sev in ("red", "yellow") if has_bp else ():
+        sys_limit, dia_limit = bp[f"{sev}_sys"], bp[f"{sev}_dia"]
+        if systolic_bp_mmhg >= sys_limit or diastolic_bp_mmhg >= dia_limit:
+            reading = f"{int(systolic_bp_mmhg)}/{int(diastolic_bp_mmhg)}"
+            rules.append(_rule("blood_pressure_mmhg", "S", sev, reading,
+                               f">= {sys_limit:g}/{dia_limit:g} mmHg", "blood_pressure_mmhg", "S2"))
+            break
 
-    # S3: Oxygen saturation (Individual SpO2 or simultaneous drop in >= 2 crew members)
-    if (spo2_pct is not None and spo2_pct < 90.0) or crew_spo2_drop_count >= 2:
-        rules.append(_rule("spo2_pct", "S", "red", spo2_pct or 0.0, "< 90% or simultaneous drop in 2+ crew members", "spo2_pct", "S3", 1))
-    elif spo2_pct is not None and spo2_pct < 95.0:
-        rules.append(_rule("spo2_pct", "S", "yellow", spo2_pct, "< 95% sustained", "spo2_pct", "S3", 1))
+    spo2 = THRESHOLDS["spo2_pct"]
+    if (spo2_pct is not None and spo2_pct < spo2["red"]) or crew_spo2_drop_count >= 2:
+        rules.append(_rule("spo2_pct", "S", "red", spo2_pct or 0.0,
+                           f"< {spo2['red']:g}% or drop in 2+ crew members", "spo2_pct", "S3", 1))
+    elif spo2_pct is not None and spo2_pct < spo2["yellow"]:
+        rules.append(_rule("spo2_pct", "S", "yellow", spo2_pct, f"< {spo2['yellow']:g}% sustained",
+                           "spo2_pct", "S3", 1))
 
-    # S4: Space radiation (Cumulative dose vs. Solar Particle Event SPE)
-    if solar_event_flag or (proton_flux_pfu is not None and proton_flux_pfu >= 10.0):
-        rules.append(_rule("radiation_spe", "S", "red", proton_flux_pfu if proton_flux_pfu is not None else "Active SPE", "Solar event: protons >= 10 MeV at >= 10 pfu", "radiation", "S4"))
+    rad = THRESHOLDS["radiation"]
+    if solar_event_flag or (proton_flux_pfu is not None and proton_flux_pfu >= rad["proton_pfu"]):
+        value = proton_flux_pfu if proton_flux_pfu is not None else "Active SPE"
+        ref = f"Solar event: >= 10 MeV protons at >= {rad['proton_pfu']:g} pfu"
+        rules.append(_rule("radiation_spe", "S", "red", value, ref, "radiation", "S4"))
     elif cumulative_radiation_msv is not None:
-        limit = mission_radiation_limit_msv * THRESHOLDS["radiation"]["yellow_ratio"]
+        limit = mission_radiation_limit_msv * rad["yellow_ratio"]
         if cumulative_radiation_msv >= limit:
-            rules.append(_rule("cumulative_radiation_msv", "S", "yellow", cumulative_radiation_msv, f"Cumulative >= 50% of limit ({limit:.0f} mSv)", "radiation", "S4"))
-
+            rules.append(_rule("cumulative_radiation_msv", "S", "yellow", cumulative_radiation_msv,
+                               f"Cumulative >= {rad['yellow_ratio']:.0%} of limit ({limit:.0f} mSv)",
+                               "radiation", "S4"))
     return rules
 
 
@@ -367,7 +374,9 @@ def evaluate_overall_health(
 
     # Determine overall triage_status (green | yellow | red)
     vals = set(cat_sev.values())
-    triage: Literal["green", "yellow", "red"] = "red" if "red" in vals else ("yellow" if "yellow" in vals else "green")
+    triage: Literal["green", "yellow", "red"] = (
+        "red" if "red" in vals else ("yellow" if "yellow" in vals else "green")
+    )
 
     # Determine the monitoring/sampling mode triggered by the alert priority
     if cat_sev["G"] != "normal":

@@ -27,7 +27,7 @@ def main() -> None:
     args = parser.parse_args()
 
     with sesion(args.db) as db:
-        logs = [db.mission_logs.obtener(args.log)] if args.log else db.mission_logs.listar(orden="id")
+        logs = [db.mission_logs.obtener(args.log)] if args.log else db.mission_logs.activos()
         names = {u["id"]: u["full_name"] for u in db.usuarios.listar()}
 
     for log in logs:

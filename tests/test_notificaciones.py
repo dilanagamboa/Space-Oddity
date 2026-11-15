@@ -2,33 +2,20 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
 
-from scripts.generar_datos import MissionConfig, generate_mission
 from services.database import sesion
 from services.eventos import EventBus
 from services.notificaciones import CHANNELS, send_alert_notification, subscribe_notifications
-from services.reportes import process_days, process_mission_log
-
-
-@pytest.fixture(scope="module")
-def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Generates a 16-day mission (day 15 triggers S1 hyperglycemia on astronaut 1)."""
-    path = tmp_path_factory.mktemp("notif") / "mission.db"
-    generate_mission(MissionConfig(days=16, seed=5), path, sync_nasa=False)
-    process_mission_log(1, db_path=path, bus=EventBus())
-    return path
+from services.reportes import process_days
 
 
 @pytest.fixture
-def db_path(template: Path, tmp_path: Path) -> Path:
-    """Copies the template DB before each test for isolation."""
-    path = tmp_path / "copy.db"
-    shutil.copy(template, path)
-    return path
+def db_path(mission_copy) -> Path:
+    """16-day mission (day 15 triggers S1 hyperglycemia on astronaut 1)."""
+    return mission_copy(16, 5)
 
 
 def test_channels_registry() -> None:
@@ -61,7 +48,10 @@ def test_send_alert_notification_is_idempotent(db_path: Path) -> None:
     bus.subscribe(events.append)
     process_days(1, [15], db_path=db_path, bus=bus)
 
-    sender = lambda r, s, b: outbox.append((r, s, b)) or True
+    def sender(recipients: list[str], subject: str, body: str) -> bool:
+        outbox.append((recipients, subject, body))
+        return True
+
     # First call dispatches email and sets email_sent = 1; second call is a no-op
     assert send_alert_notification(events[0], db_path=db_path, sender=sender) is True
     assert send_alert_notification(events[0], db_path=db_path, sender=sender) is False

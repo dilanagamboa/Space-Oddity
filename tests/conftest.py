@@ -1,8 +1,9 @@
-"""Fixtures compartidas: cada test recibe una base SQLite nueva en una carpeta temporal."""
+"""Fixtures compartidas: bases SQLite temporales, vacías o con una misión generada."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import shutil
+from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
 
@@ -10,7 +11,12 @@ import pytest
 
 from core.enums import Rol, Sexo
 from scripts.crear_db import crear_base_datos
+from scripts.generar_datos import CREW, MissionConfig, generate_mission
 from services.database import Repositorios, sesion
+from services.eventos import EventBus
+from services.reportes import process_mission_log
+
+MissionFactory = Callable[..., Path]
 
 
 @pytest.fixture
@@ -45,3 +51,35 @@ def escenario(db: Repositorios) -> dict[str, int]:
         start_weight_kg=75.0, start_height_cm=178.0, start_muscle_pct=42.0, start_fat_pct=18.0,
     )
     return {"doctor": id_doctor, "astro": id_astro, "mision": id_mision, "log": id_log}
+
+
+@pytest.fixture(scope="session")
+def _mission_templates() -> dict[tuple[int, int, bool], Path]:
+    return {}
+
+
+@pytest.fixture
+def mission_copy(
+    _mission_templates: dict[tuple[int, int, bool], Path],
+    tmp_path_factory: pytest.TempPathFactory,
+    tmp_path: Path,
+) -> MissionFactory:
+    """Copia privada de una misión generada (y procesada, si se pide).
+
+    Cada plantilla ``(days, seed, processed)`` se genera una sola vez por sesión de
+    tests, y cada test recibe su propia copia, así los tests no se afectan entre sí.
+    """
+
+    def make(days: int, seed: int, *, processed: bool = True) -> Path:
+        key = (days, seed, processed)
+        if key not in _mission_templates:
+            template = tmp_path_factory.mktemp("mission") / "template.db"
+            generate_mission(MissionConfig(days=days, seed=seed), template, sync_nasa=False)
+            for id_log in range(1, len(CREW) + 1) if processed else ():
+                process_mission_log(id_log, db_path=template, bus=EventBus())
+            _mission_templates[key] = template
+        copy = tmp_path / f"mission_{days}_{seed}.db"
+        shutil.copy(_mission_templates[key], copy)
+        return copy
+
+    return make

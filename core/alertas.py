@@ -11,9 +11,6 @@ Pipeline::
     filter_repeated()    ->  drops alerts already sent in the last 24 h (unless escalated)
           |
           v
-    split_by_urgency()   ->  red = send now, yellow = daily report
-          |
-          v
     AlertDraft.to_db_row()  ->  dict ready for ``AlertaRepo.insertar(**row)``
 
 Notification rules (team document, "Notificaciones"):
@@ -219,18 +216,3 @@ def filter_repeated(
         for draft in drafts
         if _SEVERITY_RANK[draft.severity] > highest_recent.get(draft.notification_id, 0)
     ]
-
-
-# =====================================================================
-# 3. URGENCY
-# =====================================================================
-
-def split_by_urgency(drafts: Sequence[AlertDraft]) -> tuple[list[AlertDraft], list[AlertDraft]]:
-    """Separates alerts to send now (red) from those for the daily report (yellow).
-
-    Returns:
-        ``(immediate, daily_report)``.
-    """
-    immediate = [d for d in drafts if d.is_immediate]
-    daily_report = [d for d in drafts if not d.is_immediate]
-    return immediate, daily_report

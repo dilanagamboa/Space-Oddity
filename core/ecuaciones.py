@@ -14,8 +14,8 @@ Architecture rule: Importing streamlit or sqlite3 inside core/ is strictly forbi
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import math
+from collections.abc import Mapping, Sequence
 from statistics import fmean, stdev
 
 # Molecular weight of DHEA = 288.42 g/mol -> 1 pg/mL = 0.003467 nmol/L
@@ -285,7 +285,8 @@ def compute_glucose_tir_pct(
     """
     if not glucose_series_mg_dl:
         return 0.0
-    return (sum(low_mg_dl <= g <= high_mg_dl for g in glucose_series_mg_dl) / len(glucose_series_mg_dl)) * 100.0
+    in_range = sum(low_mg_dl <= g <= high_mg_dl for g in glucose_series_mg_dl)
+    return in_range / len(glucose_series_mg_dl) * 100.0
 
 
 def compute_gmi_pct(mean_glucose_mg_dl: float) -> float:
@@ -348,7 +349,10 @@ def compute_anemia_suspicion_index(
     Source: Team Custom Design (based on Tomić Mahečić 2022 & space anemia physiology).
     """
     score = 0.5 * max(resting_hr_z, 0.0) + 0.3 * max(spo2_drop_z, 0.0) + 0.2 * max(enmo_fatigue_z, 0.0)
-    hb_drop = baseline_hb_g_dl is not None and current_hb_g_dl is not None and (baseline_hb_g_dl - current_hb_g_dl) >= 1.5
+    hb_drop = (
+        baseline_hb_g_dl is not None and current_hb_g_dl is not None
+        and baseline_hb_g_dl - current_hb_g_dl >= 1.5
+    )
     return round(score, 3), int(score >= threshold or hb_drop)
 
 

@@ -8,7 +8,8 @@ astronaut, so real data is never modified.
 
 Patterns:
     * **Strategy + Registry**: each scenario is a ``ScenarioEffect`` subclass that
-      knows how to alter each table. Adding a scenario means adding one class to
+      knows how to alter each table, using the physiology shared with the data
+      generator (``core.escenarios``). Adding a scenario means adding one class to
       ``EFFECTS`` (and its value to ``EscenarioSimulacion`` + ``schema.sql``).
     * **Command**: a simulation is a stored action (``simulation_runs``) with a
       ``launch`` and a ``revert``, including the previous monitoring mode.
@@ -18,14 +19,25 @@ Current scope: one active simulation per astronaut at a time.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
 from config import DB_PATH
 from core.enums import EscenarioSimulacion, EstadoSimulacion
+from core.escenarios import (
+    ANEMIA,
+    BLUNTED_CAR_RATIO,
+    CIRCADIAN,
+    HIGH_NIGHT_CORTISOL_NMOL_L,
+    HYPERTENSIVE_CRISIS,
+    SPE_DOSE_FACTOR,
+    WatchChange,
+    infection,
+)
+from core.protocolo import CHAIR_AT, HEMOGLOBIN_AT, HourMinute, mission_moment
 from services.database import Repositorios, sesion
 from services.eventos import EventBus, default_bus
 from services.reportes import DayResult, PipelineConfig, process_days
@@ -47,64 +59,61 @@ class SimulationError(RuntimeError):
 class ScenarioEffect:
     """Base effect: leaves every row unchanged.
 
-    Subclasses override ``alter_<repo>`` methods. Each one receives a copy of a real
-    row and returns the altered copy. ``extra_rows`` may add rows that do not exist in
-    the real data (for example, an extra glucose reading).
+    ``watch_change`` alters the watch signals with the shared physiology of
+    ``core.escenarios``. ``alter_rows`` may change any other table, and
+    ``extra_rows`` may add rows that do not exist in the real data.
     """
 
     scenario: ClassVar[EscenarioSimulacion]
     default_days: ClassVar[int] = 3
     description: ClassVar[str] = ""
 
-    def alter(self, repo: str, row: Row, offset: int) -> Row:
-        """Dispatches to ``alter_<repo>``. ``offset`` is 0 on the first simulated day."""
-        method: Callable[[Row, int], Row] | None = getattr(self, f"alter_{repo}", None)
-        return method(row, offset) if method else row
+    def watch_change(self, offset: int) -> WatchChange | None:
+        """Change of the watch signals on the ``offset``-th simulated day (0 = first)."""
+        return None
+
+    def alter_rows(self, repo: str, rows: list[Row], offset: int) -> list[Row]:
+        change = self.watch_change(offset) if repo == "cardiovascular" else None
+        return [change.apply(r) for r in rows] if change else rows
 
     def extra_rows(self, db: Repositorios, id_log: int, day: int, offset: int) -> dict[str, list[Row]]:
         return {}
 
 
-def _night(row: Row) -> bool:
-    return row["sleep_stage"] > 0
+def _moment(db: Repositorios, id_log: int, day: int, at: HourMinute) -> datetime:
+    return mission_moment(db.mission_logs.obtener(id_log)["start_date"], day, at)
 
 
 class InfectionEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.INFECCION
     description = "Fiebre nocturna, taquicardia, VFC baja y respiración rápida (G1)."
 
-    def alter_cardiovascular(self, row: Row, offset: int) -> Row:
-        fever = 0.9 + 0.15 * offset          # °C, above the luteal-compensated threshold (+0.9)
-        row["skin_temperature_c"] = round(row["skin_temperature_c"] + fever, 2)
-        row["skin_temp_deviation_c"] = round((row["skin_temp_deviation_c"] or 0) + fever, 2)
-        row["heart_rate_bpm"] = round(row["heart_rate_bpm"] + 8.5 * fever + 14, 1)   # Karjalainen
-        row["rr_mean_ms"] = round(60000.0 / row["heart_rate_bpm"], 1)
-        row["hrv_rmssd_ms"] = round(row["hrv_rmssd_ms"] * 0.5, 1)
-        row["hrv_sdnn_ms"] = round(row["hrv_sdnn_ms"] * 0.55, 1)
-        row["respiratory_rate_rpm"] = round(row["respiratory_rate_rpm"] + 7.5, 1)
-        row["spo2_pct"] = round(max(row["spo2_pct"] - 1.2, 85.0), 1)
-        return row
+    def watch_change(self, offset: int) -> WatchChange:
+        return infection(0.9 + 0.15 * offset)       # Above the luteal-compensated threshold (+0.9 °C)
 
 
 class CircadianEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.DISRUPCION_CIRCADIANA
     description = "Sueño menor a 5 h, CAR aplanado y cortisol nocturno alto (F1)."
+    LOST_SLEEP_HOURS: ClassVar[frozenset[int]] = frozenset({22, 23, 0, 1})
 
-    def alter_cardiovascular(self, row: Row, offset: int) -> Row:
-        hour = int(str(row["recorded_at"])[11:13])
-        if _night(row) and (hour >= 22 or hour < 2):                 # Lose ~2-3 h of sleep
-            row["sleep_stage"] = 0
-            row["enmo_mg"] = round(row["enmo_mg"] + 15, 1)
-        row["hrv_rmssd_ms"] = round(row["hrv_rmssd_ms"] * 0.7, 1)
-        row["heart_rate_bpm"] = round(row["heart_rate_bpm"] + 4, 1)
-        return row
+    def watch_change(self, offset: int) -> WatchChange:
+        return CIRCADIAN
 
-    def alter_saliva(self, row: Row, offset: int) -> Row:
-        if row["collection_slot"] == "wake_30m":
-            row["salivary_cortisol_nmol_l"] = round(row["salivary_cortisol_nmol_l"] * 0.75, 2)
-        if row["collection_slot"] == "bedtime":
-            row["salivary_cortisol_nmol_l"] = 6.0
-        return row
+    def alter_rows(self, repo: str, rows: list[Row], offset: int) -> list[Row]:
+        rows = super().alter_rows(repo, rows, offset)
+        if repo == "cardiovascular":
+            for row in rows:
+                if row["sleep_stage"] > 0 and int(str(row["recorded_at"])[11:13]) in self.LOST_SLEEP_HOURS:
+                    row.update(sleep_stage=0, enmo_mg=round(row["enmo_mg"] + 15, 1))
+        if repo == "saliva":
+            by_slot = {r["collection_slot"]: r for r in rows}
+            if "wake_0m" in by_slot and "wake_30m" in by_slot:
+                wake = by_slot["wake_0m"]["salivary_cortisol_nmol_l"]
+                by_slot["wake_30m"]["salivary_cortisol_nmol_l"] = round(wake * BLUNTED_CAR_RATIO, 2)
+            if "bedtime" in by_slot:
+                by_slot["bedtime"]["salivary_cortisol_nmol_l"] = HIGH_NIGHT_CORTISOL_NMOL_L
+        return rows
 
 
 class AtrophyEffect(ScenarioEffect):
@@ -113,20 +122,17 @@ class AtrophyEffect(ScenarioEffect):
     description = "Pérdida de masa del 9 % y de músculo (C1, C2)."
 
     def extra_rows(self, db: Repositorios, id_log: int, day: int, offset: int) -> dict[str, list[Row]]:
-        if offset != 0:
-            return {}
         previous = [r for r in db.composicion.rango_dias(id_log, 1, day) if not r["is_simulated"]]
-        if not previous:
+        if offset != 0 or not previous:
             return {}
-        base = dict(previous[-1])
         log = db.mission_logs.obtener(id_log)
-        base.update({
+        return {"composicion": [{
+            **previous[-1],
             "mission_day": day,
-            "recorded_at": _moment_on(db, id_log, day, 6, 15),
+            "recorded_at": _moment(db, id_log, day, CHAIR_AT),
             "weight_kg": round(log["start_weight_kg"] * 0.91, 2),
             "muscle_pct": round(log["start_muscle_pct"] - 4.0, 2),
-        })
-        return {"composicion": [base]}
+        }]}
 
 
 class SolarStormEffect(ScenarioEffect):
@@ -134,13 +140,18 @@ class SolarStormEffect(ScenarioEffect):
     default_days = 1
     description = "Evento de partículas solares: dosis ×2.5 y refugio (S4)."
 
-    def alter_radiacion(self, row: Row, offset: int) -> Row:
-        extra = row["daily_dose_msv"] * 1.5
-        row["daily_dose_msv"] = round(row["daily_dose_msv"] + extra, 4)
-        row["weighted_dose_msv"] = row["daily_dose_msv"]
-        row["cumulative_dose_msv"] = round(row["cumulative_dose_msv"] + extra * (offset + 1), 4)
-        row.update({"solar_event_flag": 1, "solar_event_type": "SEP", "data_source": "simulated"})
-        return row
+    def alter_rows(self, repo: str, rows: list[Row], offset: int) -> list[Row]:
+        if repo != "radiacion":
+            return rows
+        for row in rows:
+            extra = row["daily_dose_msv"] * (SPE_DOSE_FACTOR - 1)
+            row.update(
+                daily_dose_msv=round(row["daily_dose_msv"] + extra, 4),
+                cumulative_dose_msv=round(row["cumulative_dose_msv"] + extra * (offset + 1), 4),
+                solar_event_flag=1, solar_event_type="SEP", data_source="simulated",
+            )
+            row["weighted_dose_msv"] = row["daily_dose_msv"]
+        return rows
 
 
 class HypoglycemiaEffect(ScenarioEffect):
@@ -150,8 +161,7 @@ class HypoglycemiaEffect(ScenarioEffect):
 
     def extra_rows(self, db: Repositorios, id_log: int, day: int, offset: int) -> dict[str, list[Row]]:
         return {"sangre": [{
-            "id_mission_log": id_log, "mission_day": day,
-            "recorded_at": _moment_on(db, id_log, day, 10, 30),
+            "id_mission_log": id_log, "mission_day": day, "recorded_at": _moment(db, id_log, day, (10, 30)),
             "blood_glucose_mg_dl": 48.0, "measurement_context": "random",
         }]}
 
@@ -161,34 +171,22 @@ class CardiovascularEffect(ScenarioEffect):
     default_days = 1
     description = "Crisis hipertensiva: presión ≥ 180/120 mmHg (S2 roja)."
 
-    def alter_cardiovascular(self, row: Row, offset: int) -> Row:
-        if not _night(row):
-            row["estimated_systolic_bp_mmhg"] = row["estimated_systolic_bp_mmhg"] + 75
-            row["estimated_diastolic_bp_mmhg"] = row["estimated_diastolic_bp_mmhg"] + 50
-            row["estimated_map_mmhg"] = round(
-                row["estimated_diastolic_bp_mmhg"]
-                + (row["estimated_systolic_bp_mmhg"] - row["estimated_diastolic_bp_mmhg"]) / 3, 1
-            )
-            row["heart_rate_bpm"] = round(row["heart_rate_bpm"] + 10, 1)
-        return row
+    def watch_change(self, offset: int) -> WatchChange:
+        return HYPERTENSIVE_CRISIS
 
 
 class AnemiaEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.ANEMIA
     description = "Hemoglobina 2 g/dL bajo la base, taquicardia y SpO2 < 95 % (S3)."
 
-    def alter_cardiovascular(self, row: Row, offset: int) -> Row:
-        row["heart_rate_bpm"] = round(row["heart_rate_bpm"] + 12, 1)
-        row["rr_mean_ms"] = round(60000.0 / row["heart_rate_bpm"], 1)
-        row["spo2_pct"] = round(max(row["spo2_pct"] - 3.5, 85.0), 1)
-        row["enmo_mg"] = round(row["enmo_mg"] * 0.6, 1)
-        return row
+    def watch_change(self, offset: int) -> WatchChange:
+        return ANEMIA
 
     def extra_rows(self, db: Repositorios, id_log: int, day: int, offset: int) -> dict[str, list[Row]]:
         log = db.mission_logs.obtener(id_log)
         return {"sangre": [{
             "id_mission_log": id_log, "mission_day": day,
-            "recorded_at": _moment_on(db, id_log, day, 6, 25),
+            "recorded_at": _moment(db, id_log, day, HEMOGLOBIN_AT),
             "hemoglobin_g_dl": round(log["baseline_hb_g_dl"] - 2.0, 2), "measurement_context": "fasting",
         }]}
 
@@ -206,12 +204,6 @@ def available_scenarios() -> list[dict[str, Any]]:
         {"scenario": key, "description": e.description, "default_days": e.default_days}
         for key, e in EFFECTS.items()
     ]
-
-
-def _moment_on(db: Repositorios, id_log: int, day: int, hour: int, minute: int) -> datetime:
-    log = db.mission_logs.obtener(id_log)
-    start = datetime.fromisoformat(log["start_date"])
-    return start + timedelta(days=day - 1, hours=hour, minutes=minute)
 
 
 # =====================================================================
@@ -232,19 +224,19 @@ class SimulationResult:
 
 
 def _copy_rows(db: Repositorios, effect: ScenarioEffect, id_log: int, days: Sequence[int]) -> dict[str, int]:
-    inserted = {repo: 0 for repo in MEASUREMENT_REPOS}
+    """Copies the real rows of each day, alters them and stores them as simulated."""
+    inserted = dict.fromkeys(MEASUREMENT_REPOS, 0)
     for offset, day in enumerate(days):
         for repo in MEASUREMENT_REPOS:
-            real = [r for r in getattr(db, repo).rango_dias(id_log, day, day) if not r["is_simulated"]]
-            altered = []
-            for row in real:
-                copy = {k: v for k, v in row.items() if k != "id"}
-                altered.append({**effect.alter(repo, copy, offset), "is_simulated": 1})
-            extra = [
-                {**{k: v for k, v in r.items() if k != "id"}, "is_simulated": 1}
-                for r in effect.extra_rows(db, id_log, day, offset).get(repo, [])
+            real = [
+                {k: v for k, v in r.items() if k != "id"}
+                for r in getattr(db, repo).rango_dias(id_log, day, day) if not r["is_simulated"]
             ]
-            inserted[repo] += getattr(db, repo).insertar_varios(altered + extra)
+            extra = effect.extra_rows(db, id_log, day, offset).get(repo, [])
+            rows = effect.alter_rows(repo, real, offset) + extra
+            inserted[repo] += getattr(db, repo).insertar_varios(
+                [{**{k: v for k, v in r.items() if k != "id"}, "is_simulated": 1} for r in rows]
+            )
     return inserted
 
 

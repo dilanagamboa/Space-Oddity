@@ -1,16 +1,18 @@
 """Daily reminder service using Strategy + Registry patterns.
 
-Reads `mission_logs.active_monitoring_mode` and schedules daily reminders for
-medications (`pill`), meals (`meal`), and clinical sampling (`glucose`,
-`saliva`, `bia_chair`).
+Reads ``mission_logs.active_monitoring_mode`` and schedules daily reminders for
+medications, meals and clinical sampling (glucose, saliva, bioimpedance chair).
 
 Patterns:
-    * **Strategy + Registry**: `UserItemStrategy` handles user-prescribed items
-      (`pills`, `meals`) and `SamplingStrategy` handles clinical sampling schedules
-      driven by `active_monitoring_mode`. Every concrete strategy is registered in
-      `STRATEGIES`. `task` reminders are never created (`id_task = None`).
-    * **Idempotent**: running `generate_daily_reminders` twice on the same day
+    * **Strategy + Registry**: ``UserItemStrategy`` handles user-prescribed items
+      (pills, meals) and ``SamplingStrategy`` handles sampling schedules driven by
+      the monitoring mode. Every strategy is registered in ``STRATEGIES``.
+      ``task`` reminders are never created (``id_task`` stays NULL).
+    * **Idempotent**: running ``generate_daily_reminders`` twice on the same day
       never duplicates rows.
+
+The standard-mode schedule comes from ``core.protocolo``, the same plan the data
+generator follows. Reminder types, modes and statuses come from ``core.enums``.
 """
 
 from __future__ import annotations
@@ -18,18 +20,32 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
 from config import DB_PATH
+from core.enums import EstadoRecordatorio, ModoMonitoreo, TipoRecordatorio
+from core.protocolo import (
+    CHAIR_AT,
+    CHAIR_WEEKDAY,
+    GLUCOSE_FASTING_AT,
+    GLUCOSE_POST_MEAL_AT,
+    GLUCOSE_WEEKDAYS,
+    SALIVA_AT,
+    SALIVA_WEEKDAY,
+    HourMinute,
+    mission_moment,
+    weekday,
+)
 from services.database import sesion
 
 Row = dict[str, Any]
+Slots = tuple[tuple[HourMinute, str], ...]
 
 
 # =====================================================================
-# 1. PLANNING CONTEXT & HELPERS
+# 1. PLANNING CONTEXT
 # =====================================================================
 
 @dataclass(frozen=True)
@@ -38,36 +54,36 @@ class PlanningContext:
 
     id_mission_log: int
     mission_day: int
-    day_date: date
-    mode: str
+    start_date: str
+    mode: ModoMonitoreo
     pills: Sequence[Mapping[str, Any]]
     meals: Sequence[Mapping[str, Any]]
 
-    def row(self, r_type: str, hm: tuple[int, int], title: str, instructions: str,
+    def row(self, r_type: TipoRecordatorio, at: HourMinute, title: str, instructions: str,
             *, id_pill: int | None = None, id_meal: int | None = None) -> Row:
-        """Builds a single reminder dictionary with `id_task = None`."""
+        """Builds one reminder row (``id_task`` is always NULL in the current scope)."""
         return {
             "id_mission_log": self.id_mission_log,
             "reminder_type": r_type,
             "id_pill": id_pill,
             "id_meal": id_meal,
-            "id_task": None,                  # Always NULL per team architecture agreement
+            "id_task": None,
             "title": title,
             "instructions": instructions,
             "monitoring_mode": self.mode,
             "mission_day": self.mission_day,
-            "scheduled_at": datetime.combine(self.day_date, time(*hm), tzinfo=UTC),
-            "status": "pending",
+            "scheduled_at": mission_moment(self.start_date, self.mission_day, at),
+            "status": EstadoRecordatorio.PENDIENTE,
             "is_simulated": 0,
         }
 
 
-def _hm(val: Any) -> tuple[int, int]:
-    """Extracts (hour, minute) from a `datetime.time` object or 'HH:MM' string."""
-    if isinstance(val, time):
-        return val.hour, val.minute
-    h, m, *_ = str(val).strip().split(":")
-    return int(h), int(m)
+def _hm(value: Any) -> HourMinute:
+    """(hour, minute) from a ``time`` object or an 'HH:MM' string."""
+    if isinstance(value, time):
+        return value.hour, value.minute
+    hour, minute, *_ = str(value).strip().split(":")
+    return int(hour), int(minute)
 
 
 # =====================================================================
@@ -75,40 +91,37 @@ def _hm(val: Any) -> tuple[int, int]:
 # =====================================================================
 
 class ReminderStrategy(ABC):
-    """Base strategy registered in `STRATEGIES`."""
+    """Base strategy registered in ``STRATEGIES``."""
 
-    reminder_type: ClassVar[str]
+    reminder_type: ClassVar[TipoRecordatorio]
 
     @abstractmethod
     def build(self, ctx: PlanningContext) -> list[Row]:
-        """Returns the candidate reminder rows for `ctx.mission_day`."""
+        """Candidate reminder rows for ``ctx.mission_day``."""
 
 
 class UserItemStrategy(ReminderStrategy):
-    """Shared template for user-scheduled DB items (`pills` and `meals`)."""
+    """Shared template for active user items (pills and meals) with a day frequency."""
 
     source_attr: ClassVar[str]
     fk_field: ClassVar[str]
 
     def build(self, ctx: PlanningContext) -> list[Row]:
         items: Sequence[Mapping[str, Any]] = getattr(ctx, self.source_attr)
-        # Filter active items whose frequency cycle matches the current mission day
         return [
             ctx.row(self.reminder_type, _hm(item["scheduled_time"]), *self._format(item),
                     **{self.fk_field: int(item["id"])})
             for item in items
-            if item.get("active", 1) and (ctx.mission_day - 1) % max(1, int(item.get("frequency_days", 1))) == 0
+            if (ctx.mission_day - 1) % max(1, int(item.get("frequency_days") or 1)) == 0
         ]
 
     @abstractmethod
     def _format(self, item: Mapping[str, Any]) -> tuple[str, str]:
-        """Returns (Spanish title, Spanish instructions) for the item."""
+        """(title, instructions) in Spanish for the item."""
 
 
 class PillStrategy(UserItemStrategy):
-    """Medication reminders from the astronaut's `pills` table."""
-
-    reminder_type = "pill"
+    reminder_type = TipoRecordatorio.PASTILLA
     source_attr = "pills"
     fk_field = "id_pill"
 
@@ -118,120 +131,108 @@ class PillStrategy(UserItemStrategy):
 
 
 class MealStrategy(UserItemStrategy):
-    """Nutritional reminders from the astronaut's `meals` table."""
-
-    reminder_type = "meal"
+    reminder_type = TipoRecordatorio.COMIDA
     source_attr = "meals"
     fk_field = "id_meal"
 
     def _format(self, item: Mapping[str, Any]) -> tuple[str, str]:
-        kcal, prot = item.get("target_calories_kcal"), item.get("target_protein_g")
-        meta = f" ({kcal:.0f} kcal, {prot:.0f} g proteína)" if kcal and prot else ""
-        return f"Comida: {item['name']}", f"Registrar ingesta calórica{meta}."
+        kcal, protein = item.get("target_calories_kcal"), item.get("target_protein_g")
+        target = f" ({kcal:.0f} kcal, {protein:.0f} g proteína)" if kcal and protein else ""
+        return f"Comida: {item['name']}", f"Registrar ingesta calórica{target}."
 
 
 class SamplingStrategy(ReminderStrategy):
-    """Shared data-driven template for clinical sampling (`glucose`, `saliva`, `bia_chair`)."""
+    """Data-driven template: one schedule per monitoring mode, ``standard`` as fallback."""
 
     title: ClassVar[str]
-    schedules: ClassVar[dict[str, tuple[tuple[tuple[int, int], str], ...]]]
+    schedules: ClassVar[dict[ModoMonitoreo, Slots]]
 
     def is_active_day(self, ctx: PlanningContext) -> bool:
-        """Whether this sampling type should be scheduled on `ctx.mission_day`."""
         return True
 
     def build(self, ctx: PlanningContext) -> list[Row]:
         if not self.is_active_day(ctx):
             return []
-        slots = self.schedules.get(ctx.mode, self.schedules["standard"])
-        return [ctx.row(self.reminder_type, hm, self.title, txt) for hm, txt in slots]
+        slots = self.schedules.get(ctx.mode, self.schedules[ModoMonitoreo.ESTANDAR])
+        return [ctx.row(self.reminder_type, at, self.title, text) for at, text in slots]
 
 
 class GlucoseStrategy(SamplingStrategy):
-    """Capillary blood glucose reminders adapted to `active_monitoring_mode`."""
-
-    reminder_type = "glucose"
+    reminder_type = TipoRecordatorio.MUESTRA_GLUCOSA
     title = "Muestra de glucosa capilar"
     schedules = {
-        "alert_infection": (  # 6x/day intensive sepsis monitoring
-            ((6, 30), "Glucosa en ayunas (protocolo intensivo de infección)."),
+        ModoMonitoreo.ALERTA_INFECCION: (                   # 6/day, intensive sepsis monitoring
+            (GLUCOSE_FASTING_AT, "Glucosa en ayunas (protocolo intensivo de infección)."),
             ((9, 30), "Glucosa 2 h post-desayuno."),
             ((12, 0), "Glucosa pre-almuerzo."),
             ((14, 30), "Glucosa 2 h post-almuerzo."),
             ((18, 30), "Glucosa pre-cena."),
             ((21, 30), "Glucosa nocturna."),
         ),
-        "alert_atrophy": (    # 2x/day metabolic/insulin check
-            ((6, 30), "Glucosa en ayunas (control metabólico por atrofia)."),
+        ModoMonitoreo.ALERTA_ATROFIA: (                     # 2/day, metabolic check
+            (GLUCOSE_FASTING_AT, "Glucosa en ayunas (control metabólico por atrofia)."),
             ((14, 30), "Glucosa 2 h post-almuerzo."),
         ),
-        "alert_circadian": (  # 2x/day circadian check
-            ((6, 30), "Glucosa en ayunas (control circadiano)."),
+        ModoMonitoreo.ALERTA_CIRCADIANA: (                  # 2/day, circadian check
+            (GLUCOSE_FASTING_AT, "Glucosa en ayunas (control circadiano)."),
             ((20, 30), "Glucosa 2 h post-cena."),
         ),
-        "standard": (         # 4x/day on standard glucose days (2 days/week)
-            ((6, 30), "Glucosa capilar en ayunas."),
-            ((9, 30), "Glucosa 2 h post-desayuno."),
-            ((14, 30), "Glucosa 2 h post-almuerzo."),
-            ((20, 30), "Glucosa 2 h post-cena."),
+        ModoMonitoreo.ESTANDAR: (                           # Team sampling plan (core.protocolo)
+            (GLUCOSE_FASTING_AT, "Glucosa capilar en ayunas."),
+            *zip(GLUCOSE_POST_MEAL_AT, ("Glucosa 2 h post-desayuno.", "Glucosa 2 h post-almuerzo.",
+                                        "Glucosa 2 h post-cena."), strict=True),
         ),
     }
 
     def is_active_day(self, ctx: PlanningContext) -> bool:
-        # In standard mode, sample only on days 1 and 4 of each 7-day cycle (matches BloodGenerator)
-        return ctx.mode != "standard" or (ctx.mission_day % 7 in (1, 4))
+        return ctx.mode != ModoMonitoreo.ESTANDAR or weekday(ctx.mission_day) in GLUCOSE_WEEKDAYS
 
 
 class SalivaStrategy(SamplingStrategy):
-    """Salivary biomarker (Cortisol, DHEA, sAA) reminders adapted to `active_monitoring_mode`."""
-
-    reminder_type = "saliva"
+    reminder_type = TipoRecordatorio.MUESTRA_SALIVA
     title = "Muestra de saliva"
-    _FOUR_POINT = (
-        ((6, 0), "Saliva al despertar (0 min)."),
-        ((6, 30), "Saliva +30 min post-despertar (curva CAR)."),
-        ((16, 0), "Saliva de tarde (cortisol y sAA)."),
-        ((21, 45), "Saliva antes de dormir (ratio Cortisol/DHEA)."),
-    )
+    _FOUR_POINT: ClassVar[Slots] = tuple(zip(SALIVA_AT.values(), (
+        "Saliva al despertar (0 min).",
+        "Saliva +30 min post-despertar (curva CAR).",
+        "Saliva de tarde (cortisol y sAA).",
+        "Saliva antes de dormir (ratio Cortisol/DHEA).",
+    ), strict=True))
     schedules = {
-        "alert_circadian": _FOUR_POINT,
-        "alert_infection": (
-            ((6, 0), "Saliva matutina (inmunología/sAA)."),
+        ModoMonitoreo.ALERTA_CIRCADIANA: _FOUR_POINT,
+        ModoMonitoreo.ALERTA_INFECCION: (
+            (SALIVA_AT["wake_0m"], "Saliva matutina (inmunología/sAA)."),
             ((15, 0), "Saliva vespertina."),
-            ((21, 45), "Saliva nocturna."),
+            (SALIVA_AT["bedtime"], "Saliva nocturna."),
         ),
-        "alert_atrophy": (
-            ((6, 0), "Saliva matutina (balance C/DHEA)."),
-            ((21, 45), "Saliva nocturna."),
+        ModoMonitoreo.ALERTA_ATROFIA: (
+            (SALIVA_AT["wake_0m"], "Saliva matutina (balance C/DHEA)."),
+            (SALIVA_AT["bedtime"], "Saliva nocturna."),
         ),
-        "standard": _FOUR_POINT,
+        ModoMonitoreo.ESTANDAR: _FOUR_POINT,
     }
 
     def is_active_day(self, ctx: PlanningContext) -> bool:
-        if ctx.mode == "standard":
-            return ctx.mission_day % 7 == 3       # Weekly saliva day (matches SalivaGenerator)
-        if ctx.mode == "alert_atrophy":
-            return (ctx.mission_day - 1) % 3 == 0  # Every 3 days in atrophy mode
-        return True                               # Daily in infection and circadian modes
+        if ctx.mode == ModoMonitoreo.ESTANDAR:
+            return weekday(ctx.mission_day) == SALIVA_WEEKDAY
+        if ctx.mode == ModoMonitoreo.ALERTA_ATROFIA:
+            return (ctx.mission_day - 1) % 3 == 0          # Every 3 days in atrophy mode
+        return True                                       # Daily in infection and circadian modes
 
 
 class BiaChairStrategy(SamplingStrategy):
-    """Bioimpedance chair (BIA) reminders: daily in atrophy mode, weekly otherwise."""
-
-    reminder_type = "bia_chair"
+    reminder_type = TipoRecordatorio.PESAJE_BIA
     title = "Medición en silla de bioimpedancia (BIA)"
     schedules = {
-        "standard": (
-            ((6, 15), "Medir composición corporal en ayunas (masa, % músculo y grasa visceral)."),
+        ModoMonitoreo.ESTANDAR: (
+            (CHAIR_AT, "Medir composición corporal en ayunas (masa, % músculo y grasa visceral)."),
         ),
     }
 
     def is_active_day(self, ctx: PlanningContext) -> bool:
-        return ctx.mode == "alert_atrophy" or (ctx.mission_day % 7 == 1)
+        return ctx.mode == ModoMonitoreo.ALERTA_ATROFIA or weekday(ctx.mission_day) == CHAIR_WEEKDAY
 
 
-# Global strategy registry (excludes 'task' by design)
-STRATEGIES: dict[str, ReminderStrategy] = {
+STRATEGIES: dict[TipoRecordatorio, ReminderStrategy] = {
     s.reminder_type: s
     for s in (PillStrategy(), MealStrategy(), GlucoseStrategy(), SalivaStrategy(), BiaChairStrategy())
 }
@@ -242,8 +243,9 @@ STRATEGIES: dict[str, ReminderStrategy] = {
 # =====================================================================
 
 def _key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Natural deduplication key ensuring idempotency across re-runs."""
-    return (row["reminder_type"], str(row["scheduled_at"])[:19], row.get("id_pill"), row.get("id_meal"))
+    """Natural deduplication key (idempotency across re-runs)."""
+    return (str(row["reminder_type"]), str(row["scheduled_at"])[:19].replace(" ", "T"),
+            row.get("id_pill"), row.get("id_meal"))
 
 
 def generate_daily_reminders(
@@ -252,27 +254,26 @@ def generate_daily_reminders(
     *,
     db_path: Path | str = DB_PATH,
 ) -> list[Row]:
-    """Generates and stores daily reminders idempotently based on `active_monitoring_mode`."""
+    """Creates the day's reminders according to ``active_monitoring_mode`` (idempotent)."""
     with sesion(db_path) as db:
         log = db.mission_logs.obtener(id_mission_log)
         if log is None:
             raise ValueError(f"mission_log {id_mission_log} does not exist.")
-        id_user = int(log["id_user"])
-        start = date.fromisoformat(str(log["start_date"])[:10])
         ctx = PlanningContext(
             id_mission_log=id_mission_log,
             mission_day=mission_day,
-            day_date=start + timedelta(days=mission_day - 1),
-            mode=str(log.get("active_monitoring_mode") or "standard"),
-            pills=db.pastillas.listar(id_user=id_user),
-            meals=db.comidas.listar(id_user=id_user),
+            start_date=log["start_date"],
+            mode=ModoMonitoreo(log["active_monitoring_mode"] or ModoMonitoreo.ESTANDAR),
+            pills=db.pastillas.activas_de(log["id_user"]),
+            meals=db.comidas.activas_de(log["id_user"]),
         )
-        seen = {_key(r) for r in db.recordatorios.listar(id_mission_log=id_mission_log, mission_day=mission_day)}
+        existing = db.recordatorios.listar(id_mission_log=id_mission_log, mission_day=mission_day)
+        seen = {_key(r) for r in existing}
         created: list[Row] = []
         for strategy in STRATEGIES.values():
             for row in strategy.build(ctx):
-                if (k := _key(row)) not in seen:
-                    seen.add(k)
+                if (key := _key(row)) not in seen:
+                    seen.add(key)
                     created.append({"id": db.recordatorios.insertar(**row), **row})
     return created
 
@@ -280,36 +281,31 @@ def generate_daily_reminders(
 def complete_reminder(
     reminder_id: int,
     *,
-    status: str = "completed",
+    status: EstadoRecordatorio | str = EstadoRecordatorio.COMPLETADO,
     intake_pct: float | None = None,
     db_path: Path | str = DB_PATH,
     now: datetime | None = None,
 ) -> Row:
-    """Updates reminder status ('completed' | 'skipped' | 'pending') idempotently."""
-    if status not in {"pending", "completed", "skipped"}:
-        raise ValueError(f"Invalid status: {status}")
-    completed_at = (now or datetime.now(UTC)) if status == "completed" else None
+    """Sets a reminder's status ('completed' | 'skipped' | 'pending')."""
+    status = EstadoRecordatorio(status)                      # Raises ValueError if invalid
+    completed_at = (now or datetime.now(UTC)) if status == EstadoRecordatorio.COMPLETADO else None
     with sesion(db_path) as db:
-        db.recordatorios.actualizar(reminder_id, status=status, completed_at=completed_at, intake_pct=intake_pct)
+        db.recordatorios.actualizar(
+            reminder_id, status=status, completed_at=completed_at, intake_pct=intake_pct
+        )
         return db.recordatorios.obtener(reminder_id)
 
 
 def overdue_pill_reminders(
     id_mission_log: int,
-    mission_day: int,
     *,
     overdue_minutes: int = 60,
     db_path: Path | str = DB_PATH,
     now: datetime | None = None,
 ) -> list[Row]:
-    """Returns pending pill reminders that are >= `overdue_minutes` (60 min) past `scheduled_at`."""
-    current = (now or datetime.now(UTC)).replace(tzinfo=None)
-    limit = timedelta(minutes=overdue_minutes)
+    """Pending pill reminders at least ``overdue_minutes`` late (notification R1-R5)."""
+    limit = (now or datetime.now(UTC)) - timedelta(minutes=overdue_minutes)
     with sesion(db_path) as db:
-        rows = db.recordatorios.listar(id_mission_log=id_mission_log, mission_day=mission_day)
-    return [
-        r for r in rows
-        if r["reminder_type"] == "pill"
-        and r["status"] == "pending"
-        and (current - datetime.fromisoformat(str(r["scheduled_at"]).replace("Z", "+00:00")).replace(tzinfo=None)) >= limit
-    ]
+        pending = db.recordatorios.pendientes_hasta(id_mission_log, limit)
+    return [r for r in pending if r["reminder_type"] == TipoRecordatorio.PASTILLA]
+

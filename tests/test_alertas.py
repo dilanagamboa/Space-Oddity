@@ -10,7 +10,6 @@ from core.alertas import (
     ALERT_CATEGORY_BY_NOTIFICATION,
     build_alerts,
     filter_repeated,
-    split_by_urgency,
 )
 from core.enums import CategoriaAlerta
 from core.planes import ACTION_PLANS, get_action_plan
@@ -108,10 +107,9 @@ def test_escalation_from_yellow_to_red_is_sent() -> None:
 
 
 # --- Urgency ------------------------------------------------------------------
-def test_split_by_urgency() -> None:
-    immediate, daily = split_by_urgency(build_alerts(_infection_and_glucose(), mission_day=10))
-    assert [d.notification_id for d in immediate] == ["G1"]
-    assert [d.notification_id for d in daily] == ["S1"]
+def test_only_red_alerts_are_immediate() -> None:
+    drafts = build_alerts(_infection_and_glucose(), mission_day=10)
+    assert [(d.notification_id, d.is_immediate) for d in drafts] == [("G1", True), ("S1", False)]
 
 
 # --- Integration with the database --------------------------------------------

@@ -11,7 +11,7 @@ Architecture rule: Importing streamlit or sqlite3 inside core/ is strictly forbi
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 from core.ecuaciones import compute_readiness_score
@@ -36,9 +36,6 @@ class ReadinessBreakdown:
     readiness_score: float
     z_penalties: dict[str, float]
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serializes the breakdown into a plain dictionary."""
-        return asdict(self)
 
 
 def _pos(value: float | int | None, scale: float = 1.0) -> float:
@@ -132,11 +129,3 @@ def evaluate_daily_readiness(
         scale_non_z_metrics=scale_non_z_metrics,
     )
     return ReadinessBreakdown(compute_readiness_score(z_penalties, weights), z_penalties)
-
-
-def calculate_readiness_from_report(
-    daily_report: Mapping[str, Any],
-    weights: Mapping[str, float] | None = None,
-) -> float:
-    """Convenience wrapper returning only the float `readiness_score` (0-100) for DB storage."""
-    return evaluate_daily_readiness(daily_report, weights=weights).readiness_score

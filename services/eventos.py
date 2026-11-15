@@ -6,12 +6,12 @@ The producer never imports the consumers.
 
 Contract for consumers::
 
-    from services.eventos import AlertEvent, subscribe
+    from services.eventos import AlertEvent, default_bus
 
     def send_email(event: AlertEvent) -> None:
         ...
 
-    subscribe(send_email)
+    default_bus.subscribe(send_email)
 
 Rules:
     * Events are published **after** the database transaction commits, so a
@@ -96,13 +96,3 @@ class EventBus:
 
 default_bus = EventBus()
 """Bus shared by the whole app."""
-
-
-def subscribe(handler: AlertHandler) -> Callable[[], None]:
-    """Registers a handler on the default bus."""
-    return default_bus.subscribe(handler)
-
-
-def publish_alert(event: AlertEvent) -> int:
-    """Publishes an alert on the default bus."""
-    return default_bus.publish(event)
