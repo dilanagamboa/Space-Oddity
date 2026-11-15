@@ -34,7 +34,7 @@ def test_observer_sends_spanish_email_once_and_marks_db(db_path: Path) -> None:
     assert len(outbox) == 1
     recipients, subject, body = outbox[0]
     assert {"andrea.solis@spaceoddity.dev", "laura.jimenez@spaceoddity.dev"} <= set(recipients)
-    assert "[Astro-Health] Alerta" in subject and "Plan de acción:" in body
+    assert "[Astro-Health] Alert" in subject and "Action plan:" in body
 
     # Verify `email_sent = 1` was persisted in the alerts table
     with sesion(db_path) as db:
