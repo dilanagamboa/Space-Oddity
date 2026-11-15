@@ -85,7 +85,7 @@ def _moment(db: Repositorios, id_log: int, day: int, at: HourMinute) -> datetime
 
 class InfectionEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.INFECCION
-    description = "Fiebre nocturna, taquicardia, VFC baja y respiración rápida (G1)."
+    description = "Nocturnal fever, tachycardia, low HRV and tachypnea (G1)."
 
     def watch_change(self, offset: int) -> WatchChange:
         return infection(0.9 + 0.15 * offset)       # Above the luteal-compensated threshold (+0.9 °C)
@@ -93,7 +93,7 @@ class InfectionEffect(ScenarioEffect):
 
 class CircadianEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.DISRUPCION_CIRCADIANA
-    description = "Sueño menor a 5 h, CAR aplanado y cortisol nocturno alto (F1)."
+    description = "Sleep < 5 h, blunted CAR and high nighttime cortisol (F1)."
     LOST_SLEEP_HOURS: ClassVar[frozenset[int]] = frozenset({22, 23, 0, 1})
 
     def watch_change(self, offset: int) -> WatchChange:
@@ -118,7 +118,7 @@ class CircadianEffect(ScenarioEffect):
 class AtrophyEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.ATROFIA
     default_days = 1
-    description = "Pérdida de masa del 9 % y de músculo (C1, C2)."
+    description = "9% body mass loss and skeletal muscle loss (C1, C2)."
 
     def extra_rows(self, db: Repositorios, id_log: int, day: int, offset: int) -> dict[str, list[Row]]:
         previous = [r for r in db.composicion.rango_dias(id_log, 1, day) if not r["is_simulated"]]
@@ -137,7 +137,7 @@ class AtrophyEffect(ScenarioEffect):
 class SolarStormEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.TORMENTA_SOLAR
     default_days = 1
-    description = "Evento de partículas solares: dosis ×2.5 y refugio (S4)."
+    description = "Solar particle event: dose x2.5 and storm shelter protocol (S4)."
 
     def alter_rows(self, repo: str, rows: list[Row], offset: int) -> list[Row]:
         if repo != "radiacion":
@@ -156,7 +156,7 @@ class SolarStormEffect(ScenarioEffect):
 class HypoglycemiaEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.HIPOGLUCEMIA
     default_days = 1
-    description = "Glucosa de 48 mg/dL a media mañana (S1 roja)."
+    description = "Mid-morning blood glucose of 48 mg/dL (Red S1)."
 
     def extra_rows(self, db: Repositorios, id_log: int, day: int, offset: int) -> dict[str, list[Row]]:
         return {"sangre": [{
@@ -168,7 +168,7 @@ class HypoglycemiaEffect(ScenarioEffect):
 class CardiovascularEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.CARDIOVASCULAR
     default_days = 1
-    description = "Crisis hipertensiva: presión ≥ 180/120 mmHg (S2 roja)."
+    description = "Hypertensive crisis: BP >= 180/120 mmHg (Red S2)."
 
     def watch_change(self, offset: int) -> WatchChange:
         return HYPERTENSIVE_CRISIS
@@ -176,7 +176,7 @@ class CardiovascularEffect(ScenarioEffect):
 
 class AnemiaEffect(ScenarioEffect):
     scenario = EscenarioSimulacion.ANEMIA
-    description = "Hemoglobina 2 g/dL bajo la base, taquicardia y SpO2 < 95 % (S3)."
+    description = "Hemoglobin 2 g/dL below baseline, tachycardia and SpO2 < 95% (S3)."
 
     def watch_change(self, offset: int) -> WatchChange:
         return ANEMIA
