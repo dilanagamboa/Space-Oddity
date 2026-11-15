@@ -1,7 +1,7 @@
 """Alert notification service using Strategy + Registry and Observer patterns.
 
 Listens to `AlertEvent` published on `services.eventos.EventBus`, formats
-clinical alert emails in Spanish for the astronaut and flight surgeons (`Rol.DOCTOR`),
+clinical alert emails in English for the astronaut and flight surgeons (`Rol.DOCTOR`),
 dispatches via the selected channel strategy, and marks `alerts.email_sent = 1`.
 
 Patterns:
@@ -29,13 +29,13 @@ from services.eventos import AlertEvent, EventBus, default_bus
 # Type alias for injectable mail sender callable: (recipients, subject, body) -> bool
 SenderFn = Callable[[list[str], str, str], bool]
 
-# Spanish translations for user-facing email notifications
-SEVERITY_ES = {"red": "ROJA (Acción Inmediata)", "orange": "NARANJA", "yellow": "AMARILLA"}
-MODE_ES = {
-    "standard": "Estándar",
-    "alert_infection": "Alerta de Infección / Sepsis",
-    "alert_atrophy": "Alerta de Atrofia / Malnutrición",
-    "alert_circadian": "Alerta Circadiana / Estrés HPA",
+# English labels for user-facing email notifications
+SEVERITY_EN = {"red": "RED (Immediate Action)", "orange": "ORANGE", "yellow": "YELLOW"}
+MODE_EN = {
+    "standard": "Standard",
+    "alert_infection": "Infection / Sepsis Alert",
+    "alert_atrophy": "Atrophy / Malnutrition Alert",
+    "alert_circadian": "Circadian / HPA Stress Alert",
 }
 
 
@@ -45,7 +45,7 @@ MODE_ES = {
 
 @dataclass(frozen=True)
 class NotificationPayload:
-    """Immutable value object holding the Spanish notification ready for dispatch."""
+    """Immutable value object holding the English notification ready for dispatch."""
 
     alert_id: int
     recipients: list[str]
@@ -93,7 +93,6 @@ class EmailChannel(DeliveryChannel):
     name = "email"
 
     def deliver(self, payload: NotificationPayload, sender: SenderFn | None = None) -> bool:
-        # Delegate to injected test/custom sender if provided, otherwise use default SMTP
         send = sender or smtp_send
         return bool(payload.recipients and send(payload.recipients, payload.subject, payload.body))
 
@@ -116,25 +115,24 @@ CHANNELS: dict[str, DeliveryChannel] = {c.name: c for c in (EmailChannel(), LogC
 # =====================================================================
 
 def build_message(event: AlertEvent, doctor_emails: list[str]) -> NotificationPayload:
-    """Composes the Spanish notification subject and body for astronaut and doctors."""
+    """Composes the English notification subject and body for astronaut and doctors."""
     draft = event.alert
-    sev = SEVERITY_ES.get(draft.severity, draft.severity.upper())
-    mode = MODE_ES.get(draft.sampling_mode_triggered, draft.sampling_mode_triggered)
-    name = event.astronaut.get("full_name", "Tripulante")
+    sev = SEVERITY_EN.get(draft.severity, draft.severity.upper())
+    mode = MODE_EN.get(draft.sampling_mode_triggered, draft.sampling_mode_triggered)
+    name = event.astronaut.get("full_name", "Crew Member")
 
-    # Combine astronaut email and flight surgeon emails without duplicates
     recipients = list(dict.fromkeys(e for e in [event.astronaut.get("email", ""), *doctor_emails] if e))
 
-    subject = f"[Astro-Health] Alerta {sev} - {name} (Día {draft.mission_day})"
+    subject = f"[Astro-Health] Alert {sev} - {name} (Day {draft.mission_day})"
     body = (
-        f"Reporte de Monitoreo Clínico Astro-Health\n"
-        f"Tripulante: {name}\n"
-        f"Día de misión: {draft.mission_day}\n"
-        f"Categoría: {draft.alert_category} ({draft.notification_id})\n"
-        f"Severidad: {sev}\n"
-        f"Motivo: {draft.title}\n"
-        f"Modo de muestreo activado: {mode}\n\n"
-        f"Plan de acción:\n{draft.action_plan_text}\n"
+        f"Astro-Health Clinical Monitoring Report\n"
+        f"Crew member: {name}\n"
+        f"Mission day: {draft.mission_day}\n"
+        f"Category: {draft.alert_category} ({draft.notification_id})\n"
+        f"Severity: {sev}\n"
+        f"Reason: {draft.title}\n"
+        f"Triggered sampling mode: {mode}\n\n"
+        f"Action plan:\n{draft.action_plan_text}\n"
     )
     return NotificationPayload(event.alert_id, recipients, subject, body)
 
@@ -147,19 +145,15 @@ def send_alert_notification(
     channel: str = "email",
 ) -> bool:
     """Handles an `AlertEvent` idempotently: sends once and marks `alerts.email_sent = 1`."""
-    # 1. Check DB state and fetch doctor emails (one doctor role sees the whole crew)
     with sesion(db_path) as db:
         stored = db.alertas.obtener(event.alert_id)
-        # Idempotency guard: abort if alert is missing or already sent
         if stored is None or stored.get("email_sent"):
             return False
         doctors = [u["email"] for u in db.usuarios.por_rol(Rol.DOCTOR)]
 
-    # 2. Build Spanish payload and dispatch via the chosen channel strategy
     if not CHANNELS[channel].deliver(build_message(event, doctors), sender=sender):
         return False
 
-    # 3. Persist email_sent = 1 so re-processing never sends duplicate emails
     with sesion(db_path) as db:
         db.alertas.actualizar(event.alert_id, email_sent=1)
     return True
