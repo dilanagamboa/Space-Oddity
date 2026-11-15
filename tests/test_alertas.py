@@ -51,7 +51,7 @@ def test_every_notification_has_plan_and_category() -> None:
 
 def test_plan_render_is_numbered() -> None:
     text = get_action_plan("S4").render("red")
-    assert text.startswith("1. ") and "refugio" in text
+    assert text.startswith("1. ") and "shelter" in text
 
 
 def test_red_escalates_recipients() -> None:
