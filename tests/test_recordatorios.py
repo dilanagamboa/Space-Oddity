@@ -20,7 +20,7 @@ from services.recordatorios import (
 
 @pytest.fixture(scope="module")
 def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Generates a 7-day mission once for all reminder tests."""
+    """Creates a 7-day mission database once for the entire test module."""
     path = tmp_path_factory.mktemp("rem") / "mission.db"
     generate_mission(MissionConfig(days=7, seed=3), path, sync_nasa=False)
     return path
@@ -28,39 +28,41 @@ def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture
 def db_path(template: Path, tmp_path: Path) -> Path:
-    """Private copy of the template database per test."""
+    """Copies the template DB before each test so tests remain isolated."""
     path = tmp_path / "copy.db"
     shutil.copy(template, path)
     return path
 
 
 def test_registry_excludes_task() -> None:
-    """Verifies Strategy + Registry keys and ensures 'task' is never registered."""
+    """Verifies that all 5 valid strategies are registered and 'task' is excluded."""
     assert set(STRATEGIES) == {"pill", "meal", "glucose", "saliva", "bia_chair"}
 
 
 def test_idempotency_and_null_id_task(db_path: Path) -> None:
-    """Running `generate_daily_reminders` twice does not duplicate rows; `id_task` is NULL."""
+    """Checks that generating twice on the same day creates 0 duplicates and keeps id_task NULL."""
     first = generate_daily_reminders(1, 1, db_path=db_path)
+    # Second call on the same day must return an empty list (idempotent)
     assert first and generate_daily_reminders(1, 1, db_path=db_path) == []
+    # Every reminder must have id_task = None and never be of type 'task'
     assert all(r["id_task"] is None and r["reminder_type"] != "task" for r in first)
 
 
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [
-        # Day 2 (non-sampling day in standard mode): only 1 pill + 4 meals
+        # Day 2 (non-sampling day in standard mode): only 1 pill and 4 meals
         ("standard", {"pill": 1, "meal": 4, "glucose": 0, "saliva": 0, "bia_chair": 0}),
-        # Infection mode: 6 glucose + 3 saliva
+        # Infection mode: 6 daily glucose + 3 daily saliva
         ("alert_infection", {"pill": 1, "meal": 4, "glucose": 6, "saliva": 3, "bia_chair": 0}),
-        # Atrophy mode: 2 glucose + daily BIA chair
+        # Atrophy mode: 2 daily glucose + 1 daily fasting BIA chair
         ("alert_atrophy", {"pill": 1, "meal": 4, "glucose": 2, "saliva": 0, "bia_chair": 1}),
-        # Circadian mode: 2 glucose + 4 saliva (CAR + diurnal curve)
+        # Circadian mode: 2 daily glucose + 4 daily saliva (CAR + diurnal curve)
         ("alert_circadian", {"pill": 1, "meal": 4, "glucose": 2, "saliva": 4, "bia_chair": 0}),
     ],
 )
 def test_frequencies_by_monitoring_mode(db_path: Path, mode: str, expected: dict[str, int]) -> None:
-    """Checks that `active_monitoring_mode` dynamically adjusts daily sampling reminders."""
+    """Verifies that changing `active_monitoring_mode` adapts the sampling schedule."""
     with sesion(db_path) as db:
         db.mission_logs.actualizar(1, active_monitoring_mode=mode)
     rows = generate_daily_reminders(1, 2, db_path=db_path)
@@ -68,11 +70,14 @@ def test_frequencies_by_monitoring_mode(db_path: Path, mode: str, expected: dict
 
 
 def test_overdue_pill_and_completion(db_path: Path) -> None:
-    """Pill at 08:00 is not overdue at 08:30, overdue at 09:05 (>=60m), and cleared when completed."""
+    """Verifies 60-minute overdue detection for pills and status transition to completed."""
     generate_daily_reminders(1, 1, db_path=db_path)
+    # Pill is scheduled at 08:00 UTC -> at 08:30 (30 min elapsed) it is not overdue yet
     assert not overdue_pill_reminders(1, 1, db_path=db_path, now=datetime(2024, 5, 1, 8, 30, tzinfo=UTC))
 
+    # At 09:05 UTC (65 min elapsed >= 60 min) it must be flagged as overdue
     (overdue,) = overdue_pill_reminders(1, 1, db_path=db_path, now=datetime(2024, 5, 1, 9, 5, tzinfo=UTC))
+    # Marking it completed stamps completed_at and clears it from the overdue list
     updated = complete_reminder(overdue["id"], db_path=db_path, now=datetime(2024, 5, 1, 9, 6, tzinfo=UTC))
     assert updated["status"] == "completed" and updated["completed_at"] is not None
     assert not overdue_pill_reminders(1, 1, db_path=db_path, now=datetime(2024, 5, 1, 9, 30, tzinfo=UTC))
